@@ -191,6 +191,10 @@ _rg() {
     '--max-columns-preview[show preview for long lines (with -M)]'
     $no"--no-max-columns-preview[don't show preview for long lines (with -M)]"
 
+    + '(ensure-eol)' # Ensure EOL options
+    $no'--ensure-eol[ensure EOL character for each match/context line printed]'
+    "--no-ensure-eol[don't ensure EOL character for each match/context line printed]"
+
     + '(max-depth)' # Directory-depth options
     {-d,--max-depth}'[specify max number of directories to descend]:number of directories'
     '--maxdepth=[alias for --max-depth]:number of directories'

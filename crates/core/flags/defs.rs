@@ -99,6 +99,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &Multiline,
     &MultilineDotall,
     &NoConfig,
+    &NoEnsureEOL,
     &NoIgnore,
     &NoIgnoreDot,
     &NoIgnoreExclude,
@@ -4219,6 +4220,51 @@ fn test_no_config() {
 
     let args = parse_low_raw(["--no-config"]).unwrap();
     assert_eq!(true, args.no_config);
+}
+
+/// --no-ensure-eol
+#[derive(Debug)]
+struct NoEnsureEOL;
+
+impl Flag for NoEnsureEOL {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_long(&self) -> &'static str {
+        "no-ensure-eol"
+    }
+    fn name_negated(&self) -> Option<&'static str> {
+        Some("ensure-eol")
+    }
+    fn doc_category(&self) -> Category {
+        Category::Output
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Dont automatically add end-of-line characters to printed matches and context lines"
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+TODO: Document
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        args.no_ensure_eol = v.unwrap_switch();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_no_ensure_eol() {
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(false, args.no_ensure_eol);
+
+    let args = parse_low_raw(["--no-ensure-eol"]).unwrap();
+    assert_eq!(true, args.no_ensure_eol);
+
+    let args = parse_low_raw(["--no-ensure-eol", "--ensure-eol"]).unwrap();
+    assert_eq!(false, args.no_ensure_eol);
 }
 
 /// --no-ignore

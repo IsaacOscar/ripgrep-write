@@ -77,6 +77,7 @@ pub(crate) struct LowArgs {
     pub(crate) multiline: bool,
     pub(crate) multiline_dotall: bool,
     pub(crate) no_config: bool,
+    pub(crate) no_ensure_eol: bool,
     pub(crate) no_ignore_dot: bool,
     pub(crate) no_ignore_exclude: bool,
     pub(crate) no_ignore_files: bool,
