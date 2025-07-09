@@ -56,6 +56,7 @@ struct Config {
     separator_field_context: Arc<Vec<u8>>,
     separator_path: Option<u8>,
     path_terminator: Option<u8>,
+    ensure_eol: bool,
 }
 
 impl Default for Config {
@@ -82,6 +83,7 @@ impl Default for Config {
             separator_field_context: Arc::new(b"-".to_vec()),
             separator_path: None,
             path_terminator: None,
+            ensure_eol: true,
         }
     }
 }
@@ -472,6 +474,13 @@ impl StandardBuilder {
         terminator: Option<u8>,
     ) -> &mut StandardBuilder {
         self.config.path_terminator = terminator;
+        self
+    }
+
+    /// Whether to ensure that a newline is always printed, even if the
+    /// printed match/context doesn't end with one. Defaults to true.
+    pub fn ensure_eol(&mut self, ensure: bool) -> &mut StandardBuilder {
+        self.config.ensure_eol = ensure;
         self
     }
 }
@@ -1121,7 +1130,9 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
                 self.write_exceeded_line(bytes, line, matches, &mut midx)?;
             } else {
                 self.write_colored_matches(bytes, line, matches, &mut midx)?;
-                self.write_line_term()?;
+                if self.config().ensure_eol {
+                    self.write_line_term()?;
+                }
             }
         }
         Ok(())
@@ -1275,7 +1286,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         } else {
             // self.write_trim(line)?;
             self.write(line)?;
-            if !self.has_line_terminator(line) {
+            if self.config().ensure_eol && !self.has_line_terminator(line) {
                 self.write_line_term()?;
             }
         }
@@ -1299,7 +1310,9 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
             self.write_exceeded_line(bytes, line, matches, &mut 0)
         } else {
             self.write_colored_matches(bytes, line, matches, &mut 0)?;
-            self.write_line_term()?;
+            if self.config().ensure_eol {
+                self.write_line_term()?;
+            }
             Ok(())
         }
     }
@@ -1317,7 +1330,12 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
         matches: &[Match],
         match_index: &mut usize,
     ) -> io::Result<()> {
-        self.trim_line_terminator(bytes, &mut line);
+        if self.config().ensure_eol {
+            // If we are in ensure_eol mode, then self.write_line_terminator will be called after this
+            // so we ensure no extra line terminator is added here
+            self.trim_line_terminator(bytes, &mut line);
+        }
+
         if matches.is_empty() {
             self.write(&bytes[line])?;
             return Ok(());
@@ -1369,7 +1387,6 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
                 + line.start();
             line = line.with_end(end);
             self.write_colored_matches(bytes, line, matches, match_index)?;
-
             if matches.is_empty() {
                 self.write(b" [... omitted end of long line]")?;
             } else {
@@ -3874,6 +3891,171 @@ e
             .unwrap();
         let got = printer_contents(&mut printer);
         let expected = "hello\nworld\r\n";
+        assert_eq_printed!(expected, got);
+    }
+
+    #[test]
+    fn no_ensure_eol() {
+        assert_eq!('.', SHERLOCK.chars().last().unwrap()); // No EOL at the end of sherlock
+        let matcher = RegexMatcher::new(".").unwrap();
+
+        let mut printer = StandardBuilder::new()
+            .ensure_eol(true)
+            .build(NoColor::new(vec![]));
+        let mut sink = printer.sink(&matcher);
+        SearcherBuilder::new()
+            .line_number(false)
+            .build()
+            .search_reader(&matcher, SHERLOCK.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq_printed!(
+            SHERLOCK.to_owned() + "\n",
+            printer_contents(&mut printer)
+        );
+
+        let mut printer = StandardBuilder::new()
+            .ensure_eol(false)
+            .replacement(Some(b"$0".to_vec()))
+            .build(NoColor::new(vec![]));
+        let mut sink = printer.sink(&matcher);
+        SearcherBuilder::new()
+            .line_number(false)
+            .build()
+            .search_reader(&matcher, SHERLOCK.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq_printed!(SHERLOCK, printer_contents(&mut printer));
+    }
+
+    #[test]
+    fn no_ensure_eol_only_matching() {
+        let matcher = RegexMatcher::new("Doctor Watsons|Sherlock").unwrap();
+        let mut printer = StandardBuilder::new()
+            .only_matching(true)
+            .ensure_eol(false)
+            .column(true)
+            .build(NoColor::new(vec![]));
+        SearcherBuilder::new()
+            .line_number(true)
+            .build()
+            .search_reader(
+                &matcher,
+                SHERLOCK.as_bytes(),
+                printer.sink(&matcher),
+            )
+            .unwrap();
+
+        let got = printer_contents(&mut printer);
+        let expected = "1:9:Doctor Watsons1:57:Sherlock3:49:Sherlock";
+        assert_eq_printed!(expected, got);
+    }
+
+    #[test]
+    fn no_ensure_eol_heading() {
+        let matcher = RegexMatcher::new("Watson").unwrap();
+        let mut printer = StandardBuilder::new()
+            .heading(true)
+            .ensure_eol(false)
+            .only_matching(true)
+            .build(NoColor::new(vec![]));
+        SearcherBuilder::new()
+            .line_number(false)
+            .build()
+            .search_reader(
+                &matcher,
+                SHERLOCK.as_bytes(),
+                printer.sink_with_path(&matcher, "sherlock"),
+            )
+            .unwrap();
+
+        let matcher = RegexMatcher::new("Sherlock").unwrap();
+        SearcherBuilder::new()
+            .line_number(false)
+            .build()
+            .search_reader(
+                &matcher,
+                SHERLOCK.as_bytes(),
+                printer.sink_with_path(&matcher, "sherlock"),
+            )
+            .unwrap();
+
+        let got = printer_contents(&mut printer);
+        let expected = "\
+sherlock
+WatsonWatsonsherlock
+SherlockSherlock";
+        assert_eq_printed!(expected, got);
+    }
+
+    #[test]
+    fn no_ensure_eol_ansi() {
+        let no_eol = SHERLOCK.trim_end();
+        assert_eq!('.', no_eol.chars().last().unwrap());
+        let matcher = RegexMatcher::new("and").unwrap();
+        let mut printer = StandardBuilder::new()
+            .color_specs(ColorSpecs::default_with_color())
+            .ensure_eol(false)
+            .build(Ansi::new(vec![]));
+        SearcherBuilder::new()
+            .line_number(false)
+            .build()
+            .search_reader(&matcher, no_eol.as_bytes(), printer.sink(&matcher))
+            .unwrap();
+
+        let got = printer_contents_ansi(&mut printer);
+        let expected = "\
+but Doctor Watson has to have it taken out for him \x1b[0m\x1b[1m\x1b[31mand\x1b[0m dusted,
+\x1b[0m\x1b[1m\x1b[31mand\x1b[0m exhibited clearly, with a label attached.";
+        assert_eq_printed!(expected, got);
+    }
+
+    #[test]
+    fn no_ensure_eol_max_columns() {
+        let matcher = RegexMatcher::new("exhibited|dusted").unwrap();
+        let mut printer = StandardBuilder::new()
+            .color_specs(ColorSpecs::default_with_color())
+            .max_columns(Some(46))
+            .max_columns_preview(true)
+            .ensure_eol(false)
+            .build(Ansi::new(vec![]));
+        SearcherBuilder::new()
+            .line_number(false)
+            .build()
+            .search_reader(
+                &matcher,
+                SHERLOCK.as_bytes(),
+                printer.sink(&matcher),
+            )
+            .unwrap();
+
+        let got = printer_contents_ansi(&mut printer);
+        let expected = "\
+but Doctor Watson has to have it taken out for [... 1 more match]
+and \x1b[0m\x1b[1m\x1b[31mexhibited\x1b[0m clearly, with a label attached.";
+        assert_eq_printed!(expected, got);
+    }
+
+    #[test]
+    fn no_ensure_eol_multi_line_ansi() {
+        let matcher = RegexMatcher::new("(?s)dusted.+attached").unwrap();
+        let mut printer = StandardBuilder::new()
+            .color_specs(ColorSpecs::default_with_color())
+            .ensure_eol(false)
+            .build(Ansi::new(vec![]));
+        SearcherBuilder::new()
+            .line_number(false)
+            .multi_line(true)
+            .build()
+            .search_reader(
+                &matcher,
+                SHERLOCK.as_bytes(),
+                printer.sink(&matcher),
+            )
+            .unwrap();
+
+        let got = printer_contents_ansi(&mut printer);
+        let expected = "\
+but Doctor Watson has to have it taken out for him and \x1b[0m\x1b[1m\x1b[31mdusted,
+\x1b[0m\x1b[0m\x1b[1m\x1b[31mand exhibited clearly, with a label attached\x1b[0m.";
         assert_eq_printed!(expected, got);
     }
 }

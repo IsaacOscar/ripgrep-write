@@ -72,6 +72,7 @@ pub(crate) struct HiArgs {
     mode: Mode,
     multiline: bool,
     multiline_dotall: bool,
+    no_ensure_eol: bool,
     no_ignore_dot: bool,
     no_ignore_exclude: bool,
     no_ignore_files: bool,
@@ -287,6 +288,7 @@ impl HiArgs {
             mmap_choice,
             multiline: low.multiline,
             multiline_dotall: low.multiline_dotall,
+            no_ensure_eol: low.no_ensure_eol,
             no_ignore_dot: low.no_ignore_dot,
             no_ignore_exclude: low.no_ignore_exclude,
             no_ignore_files: low.no_ignore_files,
@@ -623,7 +625,8 @@ impl HiArgs {
             )
             .separator_path(self.path_separator.clone())
             .stats(self.stats.is_some())
-            .trim_ascii(self.trim);
+            .trim_ascii(self.trim)
+            .ensure_eol(!self.no_ensure_eol);
         // When doing multi-threaded searching, the buffer writer is
         // responsible for writing separators since it is the only thing that
         // knows whether something has been printed or not. But for the single
