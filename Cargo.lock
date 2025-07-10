@@ -171,7 +171,7 @@ dependencies = [
  "bstr",
  "grep-matcher",
  "grep-regex",
- "grep-searcher",
+ "grep-searcher-write",
  "log",
  "serde",
  "serde_json",
@@ -190,7 +190,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "grep-searcher"
+name = "grep-searcher-write"
 version = "0.1.14"
 dependencies = [
  "bstr",
@@ -213,7 +213,7 @@ dependencies = [
  "grep-pcre2",
  "grep-printer-write",
  "grep-regex",
- "grep-searcher",
+ "grep-searcher-write",
  "termcolor",
  "walkdir",
 ]

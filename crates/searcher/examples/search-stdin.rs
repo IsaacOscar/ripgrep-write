@@ -4,8 +4,8 @@ use std::io;
 use std::process;
 
 use grep_regex::RegexMatcher;
-use grep_searcher::sinks::UTF8;
-use grep_searcher::Searcher;
+use grep_searcher_write::sinks::UTF8;
+use grep_searcher_write::Searcher;
 
 fn main() {
     if let Err(err) = example() {
