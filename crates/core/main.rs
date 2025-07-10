@@ -2,11 +2,9 @@
 The main entry point into ripgrep.
 */
 
-use std::{io::Write, process::ExitCode};
-
-use ignore::WalkState;
-
 use crate::flags::{HiArgs, SearchMode};
+use ignore::WalkState;
+use std::{io::Write, process::ExitCode};
 
 #[macro_use]
 mod messages;
@@ -14,6 +12,7 @@ mod messages;
 mod flags;
 mod haystack;
 mod logger;
+mod output;
 mod search;
 
 // Since Rust no longer uses jemalloc by default, ripgrep will, by default,
@@ -119,8 +118,9 @@ fn search(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
     let mut searcher = args.search_worker(
         args.matcher()?,
         args.searcher()?,
-        args.printer(mode, args.stdout()),
+        args.printer(mode, args.output(args.stdout())?),
     )?;
+
     for haystack in haystacks {
         searched = true;
         let search_result = match searcher.search(&haystack) {
@@ -140,12 +140,13 @@ fn search(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
             break;
         }
     }
+    let mut output = searcher.into_printer().into_inner();
+    output.save()?;
     if args.has_implicit_path() && !searched {
         eprint_nothing_searched();
     }
     if let Some(ref stats) = stats {
-        let wtr = searcher.printer().get_mut();
-        let _ = print_stats(mode, stats, started_at, wtr);
+        let _ = print_stats(mode, stats, started_at, &mut output.stdout);
     }
     Ok(matched)
 }
@@ -170,23 +171,25 @@ fn search_parallel(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
     let mut searcher = args.search_worker(
         args.matcher()?,
         args.searcher()?,
-        args.printer(mode, bufwtr.buffer()),
+        args.printer(mode, args.output(bufwtr.buffer())?),
     )?;
+
     args.walk_builder()?.build_parallel().run(|| {
         let bufwtr = &bufwtr;
         let stats = &stats;
         let matched = &matched;
         let searched = &searched;
         let haystack_builder = &haystack_builder;
-        let mut searcher = searcher.clone();
+        let searcher = searcher.clone();
 
         Box::new(move |result| {
+            let mut searcher = searcher.clone();
             let haystack = match haystack_builder.build_from_result(result) {
                 Some(haystack) => haystack,
                 None => return WalkState::Continue,
             };
             searched.store(true, Ordering::SeqCst);
-            searcher.printer().get_mut().clear();
+            searcher.printer().get_mut().stdout.clear();
             let search_result = match searcher.search(&haystack) {
                 Ok(search_result) => search_result,
                 Err(err) => {
@@ -194,6 +197,13 @@ fn search_parallel(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
                     return WalkState::Continue;
                 }
             };
+            // Ignore the returned stdout value, as the outermost 'searcher' variable has a copy
+            if let Err(err) = searcher.printer().get_mut().save() {
+                // DIFF: block is new
+                err_message!("{}: {}", haystack.path().display(), err);
+                // Continue processing other files, maybe they won't have errors
+            }
+
             if search_result.has_match() {
                 matched.store(true, Ordering::SeqCst);
             }
@@ -201,7 +211,9 @@ fn search_parallel(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
                 let mut stats = locked_stats.lock().unwrap();
                 *stats += search_result.stats().unwrap();
             }
-            if let Err(err) = bufwtr.print(searcher.printer().get_mut()) {
+            if let Err(err) =
+                bufwtr.print(&searcher.printer().get_mut().stdout)
+            {
                 // A broken pipe means graceful termination.
                 if err.kind() == std::io::ErrorKind::BrokenPipe {
                     return WalkState::Quit;
@@ -223,7 +235,7 @@ fn search_parallel(args: &HiArgs, mode: SearchMode) -> anyhow::Result<bool> {
         let stats = locked_stats.lock().unwrap();
         let mut wtr = searcher.printer().get_mut();
         let _ = print_stats(mode, &stats, started_at, &mut wtr);
-        let _ = bufwtr.print(&mut wtr);
+        let _ = bufwtr.print(&wtr.stdout);
     }
     Ok(matched.load(Ordering::SeqCst))
 }

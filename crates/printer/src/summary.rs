@@ -17,7 +17,7 @@ use crate::{
     counter::CounterWriter,
     hyperlink::{self, HyperlinkConfig},
     stats::Stats,
-    util::{find_iter_at_in_context, PrinterPath},
+    util::{find_iter_at_in_context, PrinterPath, WritePath},
 };
 
 /// The configuration for the summary printer.
@@ -414,7 +414,9 @@ impl<W: WriteColor> Summary<W> {
             stats,
         }
     }
+}
 
+impl<W: WritePath> Summary<W> {
     /// Return an implementation of `Sink` associated with a file path.
     ///
     /// When the printer is associated with a path, then it may, depending on
@@ -423,13 +425,14 @@ impl<W: WriteColor> Summary<W> {
         &'s mut self,
         matcher: M,
         path: &'p P,
-    ) -> SummarySink<'p, 's, M, W>
+    ) -> io::Result<SummarySink<'p, 's, M, W>>
     where
         M: Matcher,
         P: ?Sized + AsRef<Path>,
     {
+        self.wtr.get_mut().get_mut().set_path(path.as_ref())?;
         if !self.config.path && !self.config.kind.requires_path() {
-            return self.sink(matcher);
+            return Ok(self.sink(matcher));
         }
         let interpolator =
             hyperlink::Interpolator::new(&self.config.hyperlink);
@@ -440,7 +443,7 @@ impl<W: WriteColor> Summary<W> {
         };
         let ppath = PrinterPath::new(path.as_ref())
             .with_separator(self.config.separator_path);
-        SummarySink {
+        Ok(SummarySink {
             matcher,
             summary: self,
             interpolator,
@@ -449,7 +452,7 @@ impl<W: WriteColor> Summary<W> {
             match_count: 0,
             binary_byte_offset: None,
             stats,
-        }
+        })
     }
 }
 
@@ -811,6 +814,7 @@ mod tests {
     use termcolor::NoColor;
 
     use super::{Summary, SummaryBuilder, SummaryKind};
+    use crate::util::SimpleWritePath;
 
     const SHERLOCK: &'static [u8] = b"\
 For the Doctor Watsons of this world, as opposed to the Sherlock
@@ -821,8 +825,24 @@ but Doctor Watson has to have it taken out for him and dusted,
 and exhibited clearly, with a label attached.
 ";
 
+    fn no_color_path() -> SimpleWritePath<NoColor<Vec<u8>>> {
+        SimpleWritePath::new_with_function(
+            NoColor::new(vec![]),
+            |inner, path| {
+                use std::io::Write;
+                writeln!(inner, "[{}]", path.display())
+            },
+        )
+    }
+
     fn printer_contents(printer: &mut Summary<NoColor<Vec<u8>>>) -> String {
         String::from_utf8(printer.get_mut().get_ref().to_owned()).unwrap()
+    }
+    fn printer_contents_path(
+        printer: &mut Summary<SimpleWritePath<NoColor<Vec<u8>>>>,
+    ) -> String {
+        String::from_utf8(printer.get_mut().inner.get_ref().to_owned())
+            .unwrap()
     }
 
     #[test]
@@ -874,18 +894,18 @@ and exhibited clearly, with a label attached.
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Count)
             .path(false)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("2\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\n2\n", got);
     }
 
     #[test]
@@ -893,18 +913,18 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new(r"Watson").unwrap();
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Count)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("sherlock:2\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\nsherlock:2\n", got);
     }
 
     #[test]
@@ -913,18 +933,18 @@ and exhibited clearly, with a label attached.
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Count)
             .exclude_zero(false)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("sherlock:0\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\nsherlock:0\n", got);
     }
 
     #[test]
@@ -933,18 +953,18 @@ and exhibited clearly, with a label attached.
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Count)
             .exclude_zero(true)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\n", got);
     }
 
     #[test]
@@ -953,18 +973,18 @@ and exhibited clearly, with a label attached.
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Count)
             .separator_field(b"ZZ".to_vec())
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("sherlockZZ2\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\nsherlockZZ2\n", got);
     }
 
     #[test]
@@ -973,18 +993,18 @@ and exhibited clearly, with a label attached.
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Count)
             .path_terminator(Some(b'\x00'))
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("sherlock\x002\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\nsherlock\x002\n", got);
     }
 
     #[test]
@@ -993,18 +1013,23 @@ and exhibited clearly, with a label attached.
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Count)
             .separator_path(Some(b'\\'))
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "/home/andrew/sherlock"),
+                printer
+                    .sink_with_path(&matcher, "/home/andrew/sherlock")
+                    .unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("\\home\\andrew\\sherlock:2\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!(
+            "[/home/andrew/sherlock]\n\\home\\andrew\\sherlock:2\n",
+            got
+        );
     }
 
     #[test]
@@ -1028,18 +1053,18 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new(r"Watson|Sherlock").unwrap();
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::CountMatches)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("sherlock:4\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\nsherlock:4\n", got);
     }
 
     #[test]
@@ -1047,18 +1072,18 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new(r"Watson").unwrap();
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::PathWithMatch)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("sherlock\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\nsherlock\n", got);
     }
 
     #[test]
@@ -1066,18 +1091,18 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new(r"ZZZZZZZZ").unwrap();
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::PathWithMatch)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\n", got);
     }
 
     #[test]
@@ -1085,18 +1110,18 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new(r"ZZZZZZZZZ").unwrap();
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::PathWithoutMatch)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("sherlock\n", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\nsherlock\n", got);
     }
 
     #[test]
@@ -1104,18 +1129,18 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new(r"Watson").unwrap();
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::PathWithoutMatch)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         SearcherBuilder::new()
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK,
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\n", got);
     }
 
     #[test]
@@ -1123,9 +1148,10 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new(r"Watson|Sherlock").unwrap();
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Quiet)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         let match_count = {
-            let mut sink = printer.sink_with_path(&matcher, "sherlock");
+            let mut sink =
+                printer.sink_with_path(&matcher, "sherlock").unwrap();
             SearcherBuilder::new()
                 .build()
                 .search_reader(&matcher, SHERLOCK, &mut sink)
@@ -1133,8 +1159,8 @@ and exhibited clearly, with a label attached.
             sink.match_count
         };
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\n", got);
         // There is actually more than one match, but Quiet should quit after
         // finding the first one.
         assert_eq!(1, match_count);
@@ -1146,9 +1172,10 @@ and exhibited clearly, with a label attached.
         let mut printer = SummaryBuilder::new()
             .kind(SummaryKind::Quiet)
             .stats(true)
-            .build_no_color(vec![]);
+            .build(no_color_path());
         let match_count = {
-            let mut sink = printer.sink_with_path(&matcher, "sherlock");
+            let mut sink =
+                printer.sink_with_path(&matcher, "sherlock").unwrap();
             SearcherBuilder::new()
                 .build()
                 .search_reader(&matcher, SHERLOCK, &mut sink)
@@ -1156,8 +1183,8 @@ and exhibited clearly, with a label attached.
             sink.match_count
         };
 
-        let got = printer_contents(&mut printer);
-        assert_eq_printed!("", got);
+        let got = printer_contents_path(&mut printer);
+        assert_eq_printed!("[sherlock]\n", got);
         // There is actually more than one match, and Quiet will usually quit
         // after finding the first one, but since we request stats, it will
         // mush on to find all matches.

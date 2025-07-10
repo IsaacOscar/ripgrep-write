@@ -182,6 +182,11 @@ _rg() {
     '--json[output results in JSON Lines format]'
     $no"--no-json[don't output results in JSON Lines format]"
 
+    + '(write-to)' # Write options
+    {-W,--write-back}'[write results back to input files]'
+    {-O+,--write-to=}'[specify driectory to store output in]: :_files'
+
+
     + '(line-number)' # Line-number options
     {-n,--line-number}'[show line numbers for matches]'
     {-N,--no-line-number}"[don't show line numbers for matches]"
@@ -230,6 +235,10 @@ _rg() {
     + '(passthru)' # Pass-through options
     '(--vimgrep)--passthru[show both matching and non-matching lines]'
     '(--vimgrep)--passthrough[alias for --passthru]'
+
+    + '(post)' # Postprocessing options
+    '--post=[specify postprocessor utility]:postprocessor utility:_command_names -e'
+    $no'--no-post[disable postprocessor utility]'
 
     + '(pcre2)' # PCRE2 options
     {-P,--pcre2}'[enable matching with PCRE2]'

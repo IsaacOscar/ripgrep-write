@@ -3,7 +3,7 @@ use std::{env, error::Error, ffi::OsString, io::IsTerminal, process};
 use {
     grep_write::{
         cli,
-        printer::{ColorSpecs, StandardBuilder},
+        printer::{ColorSpecs, SimpleWritePath, StandardBuilder},
         regex::RegexMatcher,
         searcher::{BinaryDetection, SearcherBuilder},
     },
@@ -37,11 +37,13 @@ fn search(pattern: &str, paths: &[OsString]) -> Result<(), Box<dyn Error>> {
         .build();
     let mut printer = StandardBuilder::new()
         .color_specs(ColorSpecs::default_with_color())
-        .build(cli::stdout(if std::io::stdout().is_terminal() {
-            ColorChoice::Auto
-        } else {
-            ColorChoice::Never
-        }));
+        .build(SimpleWritePath::new(cli::stdout(
+            if std::io::stdout().is_terminal() {
+                ColorChoice::Auto
+            } else {
+                ColorChoice::Never
+            },
+        )));
 
     for path in paths {
         for result in WalkDir::new(path) {
@@ -55,11 +57,10 @@ fn search(pattern: &str, paths: &[OsString]) -> Result<(), Box<dyn Error>> {
             if !dent.file_type().is_file() {
                 continue;
             }
-            let result = searcher.search_path(
-                &matcher,
-                dent.path(),
-                printer.sink_with_path(&matcher, dent.path()),
-            );
+            let result =
+                printer.sink_with_path(&matcher, dent.path()).and_then(
+                    |sink| searcher.search_path(&matcher, dent.path(), sink),
+                );
             if let Err(err) = result {
                 eprintln!("{}: {}", dent.path().display(), err);
             }

@@ -24,7 +24,7 @@ use crate::{
     stats::Stats,
     util::{
         find_iter_at_in_context, trim_ascii_prefix, trim_line_terminator,
-        DecimalFormatter, PrinterPath, Replacer, Sunk,
+        DecimalFormatter, PrinterPath, Replacer, Sunk, WritePath,
     },
 };
 
@@ -557,43 +557,6 @@ impl<W: WriteColor> Standard<W> {
         }
     }
 
-    /// Return an implementation of `Sink` associated with a file path.
-    ///
-    /// When the printer is associated with a path, then it may, depending on
-    /// its configuration, print the path along with the matches found.
-    pub fn sink_with_path<'p, 's, M, P>(
-        &'s mut self,
-        matcher: M,
-        path: &'p P,
-    ) -> StandardSink<'p, 's, M, W>
-    where
-        M: Matcher,
-        P: ?Sized + AsRef<Path>,
-    {
-        if !self.config.path {
-            return self.sink(matcher);
-        }
-        let interpolator =
-            hyperlink::Interpolator::new(&self.config.hyperlink);
-        let stats = if self.config.stats { Some(Stats::new()) } else { None };
-        let ppath = PrinterPath::new(path.as_ref())
-            .with_separator(self.config.separator_path);
-        let needs_match_granularity = self.needs_match_granularity();
-        StandardSink {
-            matcher,
-            standard: self,
-            replacer: Replacer::new(),
-            interpolator,
-            path: Some(ppath),
-            start_time: Instant::now(),
-            match_count: 0,
-            after_context_remaining: 0,
-            binary_byte_offset: None,
-            stats,
-            needs_match_granularity,
-        }
-    }
-
     /// Returns true if and only if the configuration of the printer requires
     /// us to find each individual match in the lines reported by the searcher.
     ///
@@ -617,7 +580,45 @@ impl<W: WriteColor> Standard<W> {
         || self.config.stats
     }
 }
-
+impl<W: WritePath> Standard<W> {
+    /// Return an implementation of `Sink` associated with a file path.
+    ///
+    /// When the printer is associated with a path, then it may, depending on
+    /// its configuration, print the path along with the matches found.
+    pub fn sink_with_path<'p, 's, M, P>(
+        &'s mut self,
+        matcher: M,
+        path: &'p P,
+    ) -> io::Result<StandardSink<'p, 's, M, W>>
+    where
+        M: Matcher,
+        P: ?Sized + AsRef<Path>,
+    {
+        self.get_mut().set_path(path.as_ref())?;
+        if !self.config.path {
+            return Ok(self.sink(matcher));
+        }
+        let interpolator =
+            hyperlink::Interpolator::new(&self.config.hyperlink);
+        let stats = if self.config.stats { Some(Stats::new()) } else { None };
+        let ppath = PrinterPath::new(path.as_ref())
+            .with_separator(self.config.separator_path);
+        let needs_match_granularity = self.needs_match_granularity();
+        Ok(StandardSink {
+            matcher,
+            standard: self,
+            replacer: Replacer::new(),
+            interpolator,
+            path: Some(ppath),
+            start_time: Instant::now(),
+            match_count: 0,
+            after_context_remaining: 0,
+            binary_byte_offset: None,
+            stats,
+            needs_match_granularity,
+        })
+    }
+}
 impl<W> Standard<W> {
     /// Returns true if and only if this printer has written at least one byte
     /// to the underlying writer during any of the previous searches.
@@ -1467,6 +1468,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
     }
 
     fn write_binary_message(&self, offset: u64) -> io::Result<()> {
+        self.wtr().get_mut().abort_current_path();
         if self.sink.match_count == 0 {
             return Ok(());
         }
@@ -1798,6 +1800,7 @@ impl<'a, M: Matcher, W: WriteColor> PreludeWriter<'a, M, W> {
 
 #[cfg(test)]
 mod tests {
+    use crate::util::SimpleWritePath;
     use grep_matcher::LineTerminator;
     use grep_regex::{RegexMatcher, RegexMatcherBuilder};
     use grep_searcher::SearcherBuilder;
@@ -1824,18 +1827,40 @@ but Doctor Watson has to have it taken out for him and dusted,\r
 and exhibited clearly, with a label attached.\
 ";
 
+    fn no_color_path() -> SimpleWritePath<NoColor<Vec<u8>>> {
+        SimpleWritePath::new_with_function(
+            NoColor::new(vec![]),
+            |inner, path| {
+                use std::io::Write;
+                writeln!(inner, "[{}]", path.display())
+            },
+        )
+    }
+
     fn printer_contents(printer: &mut Standard<NoColor<Vec<u8>>>) -> String {
         String::from_utf8(printer.get_mut().get_ref().to_owned()).unwrap()
     }
-
+    fn printer_contents_path(
+        printer: &mut Standard<SimpleWritePath<NoColor<Vec<u8>>>>,
+    ) -> String {
+        String::from_utf8(printer.get_mut().inner.get_ref().to_owned())
+            .unwrap()
+    }
     fn printer_contents_ansi(printer: &mut Standard<Ansi<Vec<u8>>>) -> String {
         String::from_utf8(printer.get_mut().get_ref().to_owned()).unwrap()
     }
 
+    /*    fn printer_contents_path_ansi(
+            printer: &mut Standard<SimpleWritePath<Ansi<Vec<u8>>>>,
+        ) -> String {
+            String::from_utf8(printer.get_mut().inner.get_ref().to_owned())
+                .unwrap()
+        }
+    */
     #[test]
     fn reports_match() {
         let matcher = RegexMatcher::new("Sherlock").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         let mut sink = printer.sink(&matcher);
         SearcherBuilder::new()
             .line_number(false)
@@ -1845,7 +1870,7 @@ and exhibited clearly, with a label attached.\
         assert!(sink.has_match());
 
         let matcher = RegexMatcher::new("zzzzz").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         let mut sink = printer.sink(&matcher);
         SearcherBuilder::new()
             .line_number(false)
@@ -1860,7 +1885,7 @@ and exhibited clearly, with a label attached.\
         use grep_searcher::BinaryDetection;
 
         let matcher = RegexMatcher::new("Sherlock").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         let mut sink = printer.sink(&matcher);
         SearcherBuilder::new()
             .line_number(false)
@@ -1870,7 +1895,7 @@ and exhibited clearly, with a label attached.\
         assert!(sink.binary_byte_offset().is_none());
 
         let matcher = RegexMatcher::new(".+").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         let mut sink = printer.sink(&matcher);
         SearcherBuilder::new()
             .line_number(false)
@@ -1887,7 +1912,7 @@ and exhibited clearly, with a label attached.\
 
         let matcher = RegexMatcher::new("Sherlock|opposed").unwrap();
         let mut printer =
-            StandardBuilder::new().stats(true).build(NoColor::new(vec![]));
+            StandardBuilder::new().stats(true).build_no_color(vec![]);
         let stats = {
             let mut sink = printer.sink(&matcher);
             SearcherBuilder::new()
@@ -1914,7 +1939,7 @@ and exhibited clearly, with a label attached.\
 
         let matcher = RegexMatcher::new("Sherlock|opposed").unwrap();
         let mut printer =
-            StandardBuilder::new().stats(true).build(NoColor::new(vec![]));
+            StandardBuilder::new().stats(true).build_no_color(vec![]);
         let stats = {
             let mut sink = printer.sink(&matcher);
             SearcherBuilder::new()
@@ -1950,7 +1975,7 @@ and exhibited clearly, with a label attached.\
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer = StandardBuilder::new()
             .separator_context(Some(b"--abc--".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .before_context(1)
@@ -1981,7 +2006,7 @@ and exhibited clearly, with a label attached.
         let mut printer = StandardBuilder::new()
             .separator_search(Some(b"--xyz--".to_vec()))
             .separator_context(Some(b"--abc--".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
 
         SearcherBuilder::new()
             .line_number(false)
@@ -2032,7 +2057,7 @@ and exhibited clearly, with a label attached.
             .heading(true)
             .separator_search(Some(b"--xyz--".to_vec()))
             .separator_context(Some(b"--abc--".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
 
         SearcherBuilder::new()
             .line_number(false)
@@ -2080,19 +2105,20 @@ and exhibited clearly, with a label attached.
     fn path() {
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer =
-            StandardBuilder::new().path(false).build(NoColor::new(vec![]));
+            StandardBuilder::new().path(false).build(no_color_path());
         SearcherBuilder::new()
             .line_number(true)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[sherlock]
 1:For the Doctor Watsons of this world, as opposed to the Sherlock
 5:but Doctor Watson has to have it taken out for him and dusted,
 ";
@@ -2105,7 +2131,7 @@ and exhibited clearly, with a label attached.
         let mut printer = StandardBuilder::new()
             .separator_field_match(b"!!".to_vec())
             .separator_field_context(b"^^".to_vec())
-            .build(NoColor::new(vec![]));
+            .build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .before_context(1)
@@ -2114,12 +2140,13 @@ and exhibited clearly, with a label attached.
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[sherlock]
 sherlock!!For the Doctor Watsons of this world, as opposed to the Sherlock
 sherlock^^Holmeses, success in the province of detective work must always
 --
@@ -2135,19 +2162,20 @@ sherlock^^and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer = StandardBuilder::new()
             .separator_path(Some(b'Z'))
-            .build(NoColor::new(vec![]));
+            .build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "books/sherlock"),
+                printer.sink_with_path(&matcher, "books/sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[books/sherlock]
 booksZsherlock:For the Doctor Watsons of this world, as opposed to the Sherlock
 booksZsherlock:but Doctor Watson has to have it taken out for him and dusted,
 ";
@@ -2159,19 +2187,20 @@ booksZsherlock:but Doctor Watson has to have it taken out for him and dusted,
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer = StandardBuilder::new()
             .path_terminator(Some(b'Z'))
-            .build(NoColor::new(vec![]));
+            .build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "books/sherlock"),
+                printer.sink_with_path(&matcher, "books/sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[books/sherlock]
 books/sherlockZFor the Doctor Watsons of this world, as opposed to the Sherlock
 books/sherlockZbut Doctor Watson has to have it taken out for him and dusted,
 ";
@@ -2182,19 +2211,20 @@ books/sherlockZbut Doctor Watson has to have it taken out for him and dusted,
     fn heading() {
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer =
-            StandardBuilder::new().heading(true).build(NoColor::new(vec![]));
+            StandardBuilder::new().heading(true).build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[sherlock]
 sherlock
 For the Doctor Watsons of this world, as opposed to the Sherlock
 but Doctor Watson has to have it taken out for him and dusted,
@@ -2206,19 +2236,20 @@ but Doctor Watson has to have it taken out for him and dusted,
     fn no_heading() {
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer =
-            StandardBuilder::new().heading(false).build(NoColor::new(vec![]));
+            StandardBuilder::new().heading(false).build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[sherlock]
 sherlock:For the Doctor Watsons of this world, as opposed to the Sherlock
 sherlock:but Doctor Watson has to have it taken out for him and dusted,
 ";
@@ -2229,14 +2260,14 @@ sherlock:but Doctor Watson has to have it taken out for him and dusted,
     fn no_heading_multiple() {
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer =
-            StandardBuilder::new().heading(false).build(NoColor::new(vec![]));
+            StandardBuilder::new().heading(false).build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
@@ -2247,14 +2278,16 @@ sherlock:but Doctor Watson has to have it taken out for him and dusted,
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[sherlock]
 sherlock:For the Doctor Watsons of this world, as opposed to the Sherlock
 sherlock:but Doctor Watson has to have it taken out for him and dusted,
+[sherlock]
 sherlock:For the Doctor Watsons of this world, as opposed to the Sherlock
 sherlock:be, to a very large extent, the result of luck. Sherlock Holmes
 ";
@@ -2265,14 +2298,14 @@ sherlock:be, to a very large extent, the result of luck. Sherlock Holmes
     fn heading_multiple() {
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer =
-            StandardBuilder::new().heading(true).build(NoColor::new(vec![]));
+            StandardBuilder::new().heading(true).build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
@@ -2283,15 +2316,17 @@ sherlock:be, to a very large extent, the result of luck. Sherlock Holmes
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[sherlock]
 sherlock
 For the Doctor Watsons of this world, as opposed to the Sherlock
 but Doctor Watson has to have it taken out for him and dusted,
+[sherlock]
 sherlock
 For the Doctor Watsons of this world, as opposed to the Sherlock
 be, to a very large extent, the result of luck. Sherlock Holmes
@@ -2302,9 +2337,8 @@ be, to a very large extent, the result of luck. Sherlock Holmes
     #[test]
     fn trim_ascii() {
         let matcher = RegexMatcher::new("Watson").unwrap();
-        let mut printer = StandardBuilder::new()
-            .trim_ascii(true)
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().trim_ascii(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2328,7 +2362,7 @@ Watson
         let mut printer = StandardBuilder::new()
             .trim_ascii(true)
             .stats(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .multi_line(true)
@@ -2350,9 +2384,8 @@ Watson
     #[test]
     fn trim_ascii_with_line_term() {
         let matcher = RegexMatcher::new("Watson").unwrap();
-        let mut printer = StandardBuilder::new()
-            .trim_ascii(true)
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().trim_ascii(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .before_context(1)
@@ -2375,7 +2408,7 @@ Watson
     #[test]
     fn line_number() {
         let matcher = RegexMatcher::new("Watson").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -2397,7 +2430,7 @@ Watson
     #[test]
     fn line_number_multi_line() {
         let matcher = RegexMatcher::new("(?s)Watson.+Watson").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .multi_line(true)
@@ -2424,7 +2457,7 @@ Watson
     fn column_number() {
         let matcher = RegexMatcher::new("Watson").unwrap();
         let mut printer =
-            StandardBuilder::new().column(true).build(NoColor::new(vec![]));
+            StandardBuilder::new().column(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2447,7 +2480,7 @@ Watson
     fn column_number_multi_line() {
         let matcher = RegexMatcher::new("(?s)Watson.+Watson").unwrap();
         let mut printer =
-            StandardBuilder::new().column(true).build(NoColor::new(vec![]));
+            StandardBuilder::new().column(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .multi_line(true)
@@ -2473,9 +2506,8 @@ Watson
     #[test]
     fn byte_offset() {
         let matcher = RegexMatcher::new("Watson").unwrap();
-        let mut printer = StandardBuilder::new()
-            .byte_offset(true)
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().byte_offset(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2497,9 +2529,8 @@ Watson
     #[test]
     fn byte_offset_multi_line() {
         let matcher = RegexMatcher::new("(?s)Watson.+Watson").unwrap();
-        let mut printer = StandardBuilder::new()
-            .byte_offset(true)
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().byte_offset(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .multi_line(true)
@@ -2527,7 +2558,7 @@ Watson
         let matcher = RegexMatcher::new("ash|dusted").unwrap();
         let mut printer = StandardBuilder::new()
             .max_columns(Some(63))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2552,7 +2583,7 @@ but Doctor Watson has to have it taken out for him and dusted,
         let mut printer = StandardBuilder::new()
             .max_columns(Some(46))
             .max_columns_preview(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2577,7 +2608,7 @@ and exhibited clearly, with a label attached.
         let mut printer = StandardBuilder::new()
             .stats(true)
             .max_columns(Some(63))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2603,7 +2634,7 @@ but Doctor Watson has to have it taken out for him and dusted,
             .stats(true)
             .max_columns(Some(46))
             .max_columns_preview(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2629,7 +2660,7 @@ and exhibited clearly, with a label attached.
             .stats(true)
             .max_columns(Some(46))
             .max_columns_preview(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2656,7 +2687,7 @@ and exhibited clearly, with a label attached.
             .stats(true)
             .max_columns(Some(46))
             .max_columns_preview(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2680,7 +2711,7 @@ and exhibited clearly, with a label attached.
         let matcher = RegexMatcher::new("(?s)ash.+dusted").unwrap();
         let mut printer = StandardBuilder::new()
             .max_columns(Some(63))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .multi_line(true)
@@ -2709,7 +2740,7 @@ but Doctor Watson has to have it taken out for him and dusted,
             .stats(true)
             .max_columns(Some(46))
             .max_columns_preview(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .multi_line(true)
@@ -2733,9 +2764,8 @@ and exhibited clearly, with a label attached.
     #[test]
     fn max_matches() {
         let matcher = RegexMatcher::new("Sherlock").unwrap();
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(1))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(1)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -2757,9 +2787,8 @@ For the Doctor Watsons of this world, as opposed to the Sherlock
     fn max_matches_context() {
         // after context: 1
         let matcher = RegexMatcher::new("Doctor Watsons").unwrap();
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(1))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(1)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .after_context(1)
@@ -2779,9 +2808,8 @@ Holmeses, success in the province of detective work must always
         assert_eq_printed!(expected, got);
 
         // after context: 4
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(1))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(1)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .after_context(4)
@@ -2805,9 +2833,8 @@ but Doctor Watson has to have it taken out for him and dusted,
 
         // after context: 1, max matches: 2
         let matcher = RegexMatcher::new("Doctor Watsons|but Doctor").unwrap();
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(2))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(2)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .after_context(1)
@@ -2830,9 +2857,8 @@ and exhibited clearly, with a label attached.
         assert_eq_printed!(expected, got);
 
         // after context: 4, max matches: 2
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(2))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(2)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .after_context(4)
@@ -2859,9 +2885,8 @@ and exhibited clearly, with a label attached.
     #[test]
     fn max_matches_multi_line1() {
         let matcher = RegexMatcher::new("(?s:.{0})Sherlock").unwrap();
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(1))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(1)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .multi_line(true)
@@ -2884,9 +2909,8 @@ For the Doctor Watsons of this world, as opposed to the Sherlock
     fn max_matches_multi_line2() {
         let matcher =
             RegexMatcher::new(r"(?s)Watson.+?(Holmeses|clearly)").unwrap();
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(1))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(1)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .multi_line(true)
@@ -2912,7 +2936,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .only_matching(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -2939,7 +2963,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .only_matching(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -2967,7 +2991,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .only_matching(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -2996,7 +3020,7 @@ Holmeses, success in the province of detective work must always
             .only_matching(true)
             .max_columns(Some(10))
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3024,7 +3048,7 @@ Holmeses, success in the province of detective work must always
             .max_columns(Some(10))
             .max_columns_preview(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3056,7 +3080,7 @@ Holmeses, success in the province of detective work must always
             .only_matching(true)
             .max_columns(Some(10))
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3090,7 +3114,7 @@ Holmeses, success in the province of detective work must always
             .max_columns(Some(10))
             .max_columns_preview(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3119,7 +3143,7 @@ Holmeses, success in the province of detective work must always
             .only_matching(true)
             .max_columns(Some(50))
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3150,7 +3174,7 @@ Holmeses, success in the province of detective work must always
             .max_columns(Some(50))
             .max_columns_preview(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3178,7 +3202,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .per_match(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3205,7 +3229,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .per_match(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3233,7 +3257,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .per_match(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3262,7 +3286,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .per_match(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3292,7 +3316,7 @@ Holmeses, success in the province of detective work must always
             .per_match(true)
             .per_match_one_line(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3321,7 +3345,7 @@ Holmeses, success in the province of detective work must always
             .per_match(true)
             .per_match_one_line(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3349,7 +3373,7 @@ Holmeses, success in the province of detective work must always
             .per_match(true)
             .per_match_one_line(true)
             .column(true)
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3374,7 +3398,7 @@ Holmeses, success in the province of detective work must always
         let matcher = RegexMatcher::new(r"Sherlock|Doctor (\w+)").unwrap();
         let mut printer = StandardBuilder::new()
             .replacement(Some(b"doctah $1 MD".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .passthru(true)
@@ -3403,7 +3427,7 @@ Holmeses, success in the province of detective work must always
         let matcher = RegexMatcher::new(r"Sherlock|Doctor (\w+)").unwrap();
         let mut printer = StandardBuilder::new()
             .replacement(Some(b"doctah $1 MD".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3432,7 +3456,7 @@ Holmeses, success in the province of detective work must always
         let matcher = RegexMatcher::new(r"\n").unwrap();
         let mut printer = StandardBuilder::new()
             .replacement(Some(b"?".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .multi_line(true)
@@ -3457,7 +3481,7 @@ Holmeses, success in the province of detective work must always
             .unwrap();
         let mut printer = StandardBuilder::new()
             .replacement(Some(b"?".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_terminator(LineTerminator::byte(b'\x00'))
             .line_number(true)
@@ -3480,7 +3504,7 @@ Holmeses, success in the province of detective work must always
         let matcher = RegexMatcher::new(r"\n(.)?").unwrap();
         let mut printer = StandardBuilder::new()
             .replacement(Some(b"?$1".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .multi_line(true)
@@ -3503,7 +3527,7 @@ Holmeses, success in the province of detective work must always
         let mut printer = StandardBuilder::new()
             .max_columns(Some(67))
             .replacement(Some(b"doctah $1 MD".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3530,7 +3554,7 @@ Holmeses, success in the province of detective work must always
             .max_columns(Some(67))
             .max_columns_preview(true)
             .replacement(Some(b"doctah $1 MD".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3558,7 +3582,7 @@ Holmeses, success in the province of detective work must always
             .max_columns(Some(43))
             .max_columns_preview(true)
             .replacement(Some(b"xxx".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(false)
             .build()
@@ -3583,7 +3607,7 @@ and xxx clearly, with a label attached.
         let mut printer = StandardBuilder::new()
             .only_matching(true)
             .replacement(Some(b"doctah $1 MD".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3610,7 +3634,7 @@ and xxx clearly, with a label attached.
         let mut printer = StandardBuilder::new()
             .per_match(true)
             .replacement(Some(b"doctah $1 MD".to_vec()))
-            .build(NoColor::new(vec![]));
+            .build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .build()
@@ -3634,7 +3658,7 @@ and xxx clearly, with a label attached.
     #[test]
     fn invert() {
         let matcher = RegexMatcher::new(r"Sherlock").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .invert_match(true)
@@ -3659,7 +3683,7 @@ and xxx clearly, with a label attached.
     #[test]
     fn invert_multi_line() {
         let matcher = RegexMatcher::new(r"(?s:.{0})Sherlock").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3685,7 +3709,7 @@ and xxx clearly, with a label attached.
     #[test]
     fn invert_context() {
         let matcher = RegexMatcher::new(r"Sherlock").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .invert_match(true)
@@ -3714,7 +3738,7 @@ and xxx clearly, with a label attached.
     #[test]
     fn invert_context_multi_line() {
         let matcher = RegexMatcher::new(r"(?s:.{0})Sherlock").unwrap();
-        let mut printer = StandardBuilder::new().build(NoColor::new(vec![]));
+        let mut printer = StandardBuilder::new().build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3744,9 +3768,8 @@ and xxx clearly, with a label attached.
     #[test]
     fn invert_context_only_matching() {
         let matcher = RegexMatcher::new(r"Sherlock").unwrap();
-        let mut printer = StandardBuilder::new()
-            .only_matching(true)
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().only_matching(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .invert_match(true)
@@ -3775,9 +3798,8 @@ and xxx clearly, with a label attached.
     #[test]
     fn invert_context_only_matching_multi_line() {
         let matcher = RegexMatcher::new(r"(?s:.{0})Sherlock").unwrap();
-        let mut printer = StandardBuilder::new()
-            .only_matching(true)
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().only_matching(true).build_no_color(vec![]);
         SearcherBuilder::new()
             .multi_line(true)
             .line_number(true)
@@ -3838,9 +3860,8 @@ e
 ";
 
         let matcher = RegexMatcherBuilder::new().build(r"d").unwrap();
-        let mut printer = StandardBuilder::new()
-            .max_matches(Some(1))
-            .build(NoColor::new(vec![]));
+        let mut printer =
+            StandardBuilder::new().max_matches(Some(1)).build_no_color(vec![]);
         SearcherBuilder::new()
             .line_number(true)
             .after_context(2)
@@ -3956,14 +3977,14 @@ e
             .heading(true)
             .ensure_eol(false)
             .only_matching(true)
-            .build(NoColor::new(vec![]));
+            .build(no_color_path());
         SearcherBuilder::new()
             .line_number(false)
             .build()
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
@@ -3974,14 +3995,16 @@ e
             .search_reader(
                 &matcher,
                 SHERLOCK.as_bytes(),
-                printer.sink_with_path(&matcher, "sherlock"),
+                printer.sink_with_path(&matcher, "sherlock").unwrap(),
             )
             .unwrap();
 
-        let got = printer_contents(&mut printer);
+        let got = printer_contents_path(&mut printer);
         let expected = "\
+[sherlock]
 sherlock
-WatsonWatsonsherlock
+WatsonWatson[sherlock]
+sherlock
 SherlockSherlock";
         assert_eq_printed!(expected, got);
     }

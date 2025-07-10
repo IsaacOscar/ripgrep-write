@@ -9,7 +9,9 @@ search worker is where things like preprocessors or decompression happens.
 
 use std::{io, path::Path};
 
-use {grep::matcher::Matcher, termcolor::WriteColor};
+use {
+    grep::matcher::Matcher, grep::printer::WritePath, termcolor::WriteColor,
+};
 
 /// The configuration for the search worker.
 ///
@@ -222,6 +224,15 @@ impl<W: WriteColor> Printer<W> {
             Printer::JSON(ref mut p) => p.get_mut(),
         }
     }
+    /// Consume this printer and return back ownership of the underlying
+    /// writer.
+    pub(crate) fn into_inner(self) -> W {
+        match self {
+            Printer::Standard(p) => p.into_inner(),
+            Printer::Summary(p) => p.into_inner(),
+            Printer::JSON(p) => p.into_inner(),
+        }
+    }
 }
 
 /// A worker for executing searches.
@@ -239,7 +250,7 @@ pub(crate) struct SearchWorker<W> {
     printer: Printer<W>,
 }
 
-impl<W: WriteColor> SearchWorker<W> {
+impl<W: WritePath> SearchWorker<W> {
     /// Execute a search over the given haystack.
     pub(crate) fn search(
         &mut self,
@@ -268,6 +279,11 @@ impl<W: WriteColor> SearchWorker<W> {
     /// Return a mutable reference to the underlying printer.
     pub(crate) fn printer(&mut self) -> &mut Printer<W> {
         &mut self.printer
+    }
+
+    /// Return ownership of the underlying printer
+    pub(crate) fn into_printer(self) -> Printer<W> {
+        self.printer
     }
 
     /// Returns true if and only if the given file path should be
@@ -375,7 +391,7 @@ impl<W: WriteColor> SearchWorker<W> {
 
 /// Search the contents of the given file path using the given matcher,
 /// searcher and printer.
-fn search_path<M: Matcher, W: WriteColor>(
+fn search_path<M: Matcher, W: WritePath>(
     matcher: M,
     searcher: &mut grep::searcher::Searcher,
     printer: &mut Printer<W>,
@@ -383,7 +399,7 @@ fn search_path<M: Matcher, W: WriteColor>(
 ) -> io::Result<SearchResult> {
     match *printer {
         Printer::Standard(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
+            let mut sink = p.sink_with_path(&matcher, path)?;
             searcher.search_path(&matcher, path, &mut sink)?;
             Ok(SearchResult {
                 has_match: sink.has_match(),
@@ -391,7 +407,7 @@ fn search_path<M: Matcher, W: WriteColor>(
             })
         }
         Printer::Summary(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
+            let mut sink = p.sink_with_path(&matcher, path)?;
             searcher.search_path(&matcher, path, &mut sink)?;
             Ok(SearchResult {
                 has_match: sink.has_match(),
@@ -411,7 +427,7 @@ fn search_path<M: Matcher, W: WriteColor>(
 
 /// Search the contents of the given reader using the given matcher, searcher
 /// and printer.
-fn search_reader<M: Matcher, R: io::Read, W: WriteColor>(
+fn search_reader<M: Matcher, R: io::Read, W: WritePath>(
     matcher: M,
     searcher: &mut grep::searcher::Searcher,
     printer: &mut Printer<W>,
@@ -420,7 +436,7 @@ fn search_reader<M: Matcher, R: io::Read, W: WriteColor>(
 ) -> io::Result<SearchResult> {
     match *printer {
         Printer::Standard(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
+            let mut sink = p.sink_with_path(&matcher, path)?;
             searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
             Ok(SearchResult {
                 has_match: sink.has_match(),
@@ -428,7 +444,7 @@ fn search_reader<M: Matcher, R: io::Read, W: WriteColor>(
             })
         }
         Printer::Summary(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
+            let mut sink = p.sink_with_path(&matcher, path)?;
             searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
             Ok(SearchResult {
                 has_match: sink.has_match(),

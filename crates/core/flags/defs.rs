@@ -120,6 +120,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &Passthru,
     &PCRE2,
     &PCRE2Version,
+    &Post,
     &Pre,
     &PreGlob,
     &Pretty,
@@ -147,6 +148,8 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &WithFilename,
     &WithFilenameNo,
     &WordRegexp,
+    &WriteBack,
+    &WriteTo,
     // DEPRECATED (make them show up last in their respective categories)
     &AutoHybridRegex,
     &NoPcre2Unicode,
@@ -5454,6 +5457,85 @@ fn test_pcre2_version() {
     assert_eq!(Some(SpecialMode::VersionPCRE2), args.special);
 }
 
+/// --post
+#[derive(Debug)]
+struct Post;
+
+impl Flag for Post {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_long(&self) -> &'static str {
+        "post"
+    }
+    fn name_negated(&self) -> Option<&'static str> {
+        Some("no-post")
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("COMMAND")
+    }
+    fn doc_category(&self) -> Category {
+        Category::Output
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Pass output to COMMAND for each PATH."
+    }
+    fn doc_long(&self) -> &'static str {
+        r#"
+TODO: document
+For each input \fIPATH\fP, this flag causes ripgrep to pipe it's output
+to \fICOMMAND\fP \fIPATH\fP, whose output is then piped to stdout or to a file
+(if \flag{write-back} or \flag{write-to} are being used).
+This option expects the \fICOMMAND\fP program to either be a path or to be
+available in your \fBPATH\fP. Either an empty string \fICOMMAND\fP or the
+\fB\-\-no\-post\fP flag will disable this behavior.
+.sp
+This implies the \file{no-ensure-eol} flag.
+"#
+    }
+    fn completion_type(&self) -> CompletionType {
+        CompletionType::Executable
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        let post = match v {
+            FlagValue::Value(v) => PathBuf::from(v),
+            FlagValue::Switch(yes) => {
+                assert!(!yes, "there is no affirmative switch for --post");
+                args.post = None;
+                return Ok(());
+            }
+        };
+        args.post =
+            if post.as_os_str().is_empty() { None } else { Some(post) };
+        if args.post.is_some() {
+            args.no_ensure_eol = true;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_post() {
+    let args = parse_low_raw(["--post", "cmd"]).unwrap();
+    assert_eq!(Some(PathBuf::from("cmd")), args.post);
+    assert_eq!(true, args.no_ensure_eol);
+
+    let args = parse_low_raw(["--post", ""]).unwrap();
+    assert_eq!(None, args.post);
+    assert_eq!(false, args.no_ensure_eol);
+
+    let args = parse_low_raw(["--post", "cmd", "--no-post"]).unwrap();
+    assert_eq!(None, args.post);
+    assert_eq!(true, args.no_ensure_eol);
+
+    let args =
+        parse_low_raw(["--post", "cmd", "--write-to", "/path"]).unwrap();
+    assert_eq!(Some(PathBuf::from("cmd")), args.post);
+    assert_eq!(Some(PathBuf::from("/path")), args.write_to);
+}
+
 /// --pre
 #[derive(Debug)]
 struct Pre;
@@ -7555,6 +7637,158 @@ This overrides the \flag{line-regexp} flag.
     }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+/// -W/--write-back
+#[derive(Debug)]
+struct WriteBack;
+
+impl Flag for WriteBack {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_short(&self) -> Option<u8> {
+        Some(b'W')
+    }
+    fn name_long(&self) -> &'static str {
+        "write-back"
+    }
+    fn doc_category(&self) -> Category {
+        Category::OutputModes
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Writes output to appropriate files in the given directory."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+TODO: document
+Writes the result of the search, together with any replacements, back to the input files.
+This is a convenience alias for setting \fB\-\-write-to= \-\-passthru\fP and automatically disabling most other output flags:
+    \flag{byte-offset}, \flag{column}, \flag{line-number}, \flag{max-columns}, \flag{only-matching}, \flag{vimgrep}, \flag{with-filename}, \flag{count}, \flag{count-matches}, \flag{files-with-matches}, \flag{files-without-match}, and \flag{json}.
+    Warning about \flag{search-zip} not working.
+You can still manually enable them though.
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        assert!(v.unwrap_switch(), "--write-back flag has no negation");
+        args.write_to = Some(PathBuf::new()); // empty string to not alter paths
+        args.no_ensure_eol = true;
+        args.quiet = false;
+        args.context = ContextMode::Passthru;
+        args.byte_offset = false;
+        args.column = Some(false);
+        args.line_number = Some(false);
+        args.max_columns = None;
+        args.only_matching = false;
+        args.vimgrep = false;
+        args.with_filename = Some(false);
+        args.mode.update(Mode::Search(SearchMode::Standard));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_write_back() {
+    let args = parse_low_raw(["--write-back"]).unwrap();
+    assert_eq!(Some(PathBuf::from("")), args.write_to);
+    assert_eq!(ContextMode::Passthru, args.context);
+    assert_eq!(ColorChoice::Auto, args.color);
+    assert_eq!(false, args.byte_offset);
+    assert_eq!(true, args.no_ensure_eol);
+    assert_eq!(false, args.quiet);
+    assert_eq!(Some(false), args.column);
+    assert_eq!(Some(false), args.line_number);
+    assert_eq!(None, args.max_columns);
+    assert_eq!(false, args.only_matching);
+    assert_eq!(false, args.vimgrep);
+    assert_eq!(Some(false), args.with_filename);
+    assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
+
+    let args = parse_low_raw(["--quiet", "--write-back"]).unwrap();
+    assert_eq!(Some(PathBuf::from("")), args.write_to);
+    assert_eq!(false, args.quiet);
+
+    let args = parse_low_raw(["-W", "-N"]).unwrap();
+    assert_eq!(Some(PathBuf::from("")), args.write_to);
+    assert_eq!(Some(false), args.line_number);
+
+    let args = parse_low_raw(["--files", "-W", "-O", "/some/path"]).unwrap();
+    assert_eq!(Some(PathBuf::from("/some/path")), args.write_to);
+    assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
+}
+
+/// -O/--write-to
+#[derive(Debug)]
+struct WriteTo;
+
+impl Flag for WriteTo {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_short(&self) -> Option<u8> {
+        Some(b'O')
+    }
+    fn name_long(&self) -> &'static str {
+        "write-to"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("DIR")
+    }
+    fn doc_category(&self) -> Category {
+        Category::OutputModes
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Writes output to appropriate files in the given directory."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+TODO: document
+Explanation.
+Note that statistics and error messages are NOT written to the files
+.sp
+This implies the \flag{no-ensure-eol} flag, disables the \flag{quiet} flag, and overrides the \flag{json} flag.
+"
+    }
+    fn completion_type(&self) -> CompletionType {
+        CompletionType::Filetype
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        args.write_to = Some(PathBuf::from(v.unwrap_value()));
+        args.no_ensure_eol = true;
+        args.quiet = false;
+        if matches!(args.mode, Mode::Search(SearchMode::JSON)) {
+            // --no-json
+            args.mode.update(Mode::Search(SearchMode::Standard));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_write_to() {
+    let args = parse_low_raw(["--write-to", "folder"]).unwrap();
+    assert_eq!(Some(PathBuf::from("folder")), args.write_to);
+    assert_eq!(true, args.no_ensure_eol);
+    assert_eq!(false, args.quiet);
+
+    let args = parse_low_raw(["--files", "--write-to", ""]).unwrap();
+    assert_eq!(Some(PathBuf::from("")), args.write_to);
+    assert_eq!(Mode::Files, args.mode);
+    assert_eq!(Some(PathBuf::from("")), args.write_to);
+
+    let args = parse_low_raw(["--json", "--write-to", "/path"]).unwrap();
+    assert_eq!(Some(PathBuf::from("/path")), args.write_to);
+    assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
+
+    let args = parse_low_raw(["-O", "/some/path", "--ensure-eol"]).unwrap();
+    assert_eq!(Some(PathBuf::from("/some/path")), args.write_to);
+    assert_eq!(false, args.no_ensure_eol);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 #[test]
 fn test_word_regexp() {

@@ -293,7 +293,7 @@ impl TestCommand {
         self.cmd.stdout(process::Stdio::piped());
         self.cmd.stderr(process::Stdio::piped());
 
-        let mut child = self.cmd.spawn().unwrap();
+        let mut child = self._spawn().unwrap();
 
         // Pipe input to child process using a separate thread to avoid
         // risk of deadlock between parent and child process.
@@ -316,9 +316,18 @@ impl TestCommand {
     /// Gets the raw output of a command after filtering nonsense like jemalloc
     /// error messages from stderr.
     pub fn raw_output(&mut self) -> process::Output {
-        let mut output = self.cmd.output().unwrap();
+        let mut output = self._output().unwrap();
         output.stderr = strip_jemalloc_nonsense(&output.stderr);
         output
+    }
+
+    pub fn _output(&mut self) -> std::io::Result<std::process::Output> {
+        eprintln!("Running {:?}", self.cmd);
+        self.cmd.output()
+    }
+    pub fn _spawn(&mut self) -> std::io::Result<std::process::Child> {
+        eprintln!("Running {:?}", self.cmd);
+        self.cmd.spawn()
     }
 
     /// Runs the command and asserts that it resulted in an error exit code.
@@ -346,7 +355,7 @@ impl TestCommand {
     /// Runs the command and asserts that its exit code matches expected exit
     /// code.
     pub fn assert_exit_code(&mut self, expected_code: i32) {
-        let code = self.cmd.output().unwrap().status.code().unwrap();
+        let code = self._output().unwrap().status.code().unwrap();
         assert_eq!(
             expected_code,
             code,
@@ -367,7 +376,7 @@ impl TestCommand {
 
     /// Runs the command and asserts that something was printed to stderr.
     pub fn assert_non_empty_stderr(&mut self) {
-        let o = self.cmd.output().unwrap();
+        let o = self._output().unwrap();
         if o.status.success() || o.stderr.is_empty() {
             panic!(
                 "\n\n===== {:?} =====\n\

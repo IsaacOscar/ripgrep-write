@@ -94,6 +94,7 @@ pub(crate) struct LowArgs {
     pub(crate) one_file_system: bool,
     pub(crate) only_matching: bool,
     pub(crate) path_separator: Option<u8>,
+    pub(crate) post: Option<PathBuf>,
     pub(crate) pre: Option<PathBuf>,
     pub(crate) pre_glob: Vec<String>,
     pub(crate) quiet: bool,
@@ -109,6 +110,7 @@ pub(crate) struct LowArgs {
     pub(crate) unrestricted: usize,
     pub(crate) vimgrep: bool,
     pub(crate) with_filename: Option<bool>,
+    pub(crate) write_to: Option<PathBuf>,
 }
 
 /// A "special" mode that supercedes everything else.

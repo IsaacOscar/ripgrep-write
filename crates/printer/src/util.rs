@@ -6,9 +6,91 @@ use {
     grep_searcher::{
         LineIter, Searcher, SinkContext, SinkContextKind, SinkError, SinkMatch,
     },
+    termcolor::WriteColor,
 };
 
 use crate::{hyperlink::HyperlinkPath, MAX_LOOK_AHEAD};
+
+/// TODO: Document
+pub trait WritePath: WriteColor {
+    /// TODO: Document
+    fn set_path(&mut self, _path: &Path) -> io::Result<()>;
+}
+
+/// TODO: Document
+pub struct SimpleWritePath<W: WriteColor> {
+    /// TODO: Document
+    pub inner: W,
+    do_set_path: fn(&mut W, &Path) -> io::Result<()>,
+}
+impl<W: WriteColor> SimpleWritePath<W> {
+    /// TODO: Document
+    pub fn new(inner: W) -> SimpleWritePath<W> {
+        SimpleWritePath::new_with_function(inner, |_, _| Ok(()))
+    }
+    /// TODO: Document
+    pub fn new_with_function(
+        inner: W,
+        do_set_path: fn(&mut W, &Path) -> io::Result<()>,
+    ) -> SimpleWritePath<W> {
+        SimpleWritePath { inner, do_set_path }
+    }
+}
+impl<W: WriteColor> WritePath for SimpleWritePath<W> {
+    #[inline(always)]
+    fn set_path(&mut self, path: &Path) -> io::Result<()> {
+        (self.do_set_path)(&mut self.inner, path)
+    }
+}
+// Simply forward to the inner NoColor
+impl<W: WriteColor> io::Write for SimpleWritePath<W> {
+    #[inline(always)]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+    #[inline(always)]
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+    #[inline(always)]
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.inner.write_all(buf)
+    }
+    #[inline(always)]
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> io::Result<()> {
+        self.inner.write_fmt(args)
+    }
+    // No forwarding implementation for by_ref, as its return type is &mut Self
+}
+impl<W: WriteColor> WriteColor for SimpleWritePath<W> {
+    #[inline(always)]
+    fn supports_color(&self) -> bool {
+        self.inner.supports_color()
+    }
+    #[inline(always)]
+    fn supports_hyperlinks(&self) -> bool {
+        self.inner.supports_hyperlinks()
+    }
+    #[inline(always)]
+    fn set_color(&mut self, color: &termcolor::ColorSpec) -> io::Result<()> {
+        self.inner.set_color(color)
+    }
+    #[inline(always)]
+    fn set_hyperlink(
+        &mut self,
+        color: &termcolor::HyperlinkSpec,
+    ) -> io::Result<()> {
+        self.inner.set_hyperlink(color)
+    }
+    #[inline(always)]
+    fn reset(&mut self) -> io::Result<()> {
+        self.inner.reset()
+    }
+    #[inline(always)]
+    fn is_synchronous(&self) -> bool {
+        self.inner.is_synchronous()
+    }
+}
 
 /// A type for handling replacements while amortizing allocation.
 pub(crate) struct Replacer<M: Matcher> {

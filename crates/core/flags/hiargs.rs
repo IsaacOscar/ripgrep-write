@@ -9,7 +9,7 @@ use std::{
 
 use {
     bstr::BString,
-    grep::printer::{ColorSpecs, SummaryKind},
+    grep::printer::{ColorSpecs, SummaryKind, WritePath},
 };
 
 use crate::{
@@ -20,8 +20,11 @@ use crate::{
         PatternSource, SearchMode, SortMode, SortModeKind, TypeChange,
     },
     haystack::{Haystack, HaystackBuilder},
+    output::Output,
     search::{PatternMatcher, Printer, SearchWorker, SearchWorkerBuilder},
 };
+
+use termcolor::WriteColor;
 
 /// A high level representation of CLI arguments.
 ///
@@ -61,7 +64,7 @@ pub(crate) struct HiArgs {
     ignore_file: Vec<PathBuf>,
     include_zero: bool,
     invert_match: bool,
-    is_terminal_stdout: bool,
+    is_output_terminal: bool,
     line_number: bool,
     max_columns: Option<u64>,
     max_columns_preview: bool,
@@ -89,6 +92,7 @@ pub(crate) struct HiArgs {
     paths: Paths,
     path_terminator: Option<u8>,
     patterns: Patterns,
+    post: Option<PathBuf>,
     pre: Option<PathBuf>,
     pre_globs: ignore::overrides::Override,
     quiet: bool,
@@ -104,6 +108,7 @@ pub(crate) struct HiArgs {
     types: ignore::types::Types,
     vimgrep: bool,
     with_filename: bool,
+    write_to: Option<PathBuf>,
 }
 
 impl HiArgs {
@@ -140,7 +145,7 @@ impl HiArgs {
             _ => {}
         }
 
-        let mut state = State::new()?;
+        let mut state = State::new(low.write_to == None)?;
         let patterns = Patterns::from_low_args(&mut state, &mut low)?;
         let paths = Paths::from_low_args(&mut state, &patterns, &mut low)?;
 
@@ -152,15 +157,24 @@ impl HiArgs {
         let globs = globs(&state, &low)?;
         let pre_globs = preprocessor_globs(&state, &low)?;
 
+        // Call grep::cli::resolve_binary just like HiArgs::hostname
+        let post = match low.post.map(|bin| grep::cli::resolve_binary(bin)) {
+            Some(Ok(path)) => Some(path),
+            Some(Err(err)) => {
+                anyhow::bail!("Failed to determine postprocessor: {err}")
+            }
+            None => None,
+        };
+
         let color = match low.color {
-            ColorChoice::Auto if !state.is_terminal_stdout => {
+            ColorChoice::Auto if !state.is_output_terminal => {
                 ColorChoice::Never
             }
             _ => low.color,
         };
         let column = low.column.unwrap_or(low.vimgrep);
         let heading = match low.heading {
-            None => !low.vimgrep && state.is_terminal_stdout,
+            None => !low.vimgrep && state.is_output_terminal,
             Some(false) => false,
             Some(true) => !low.vimgrep,
         };
@@ -213,7 +227,7 @@ impl HiArgs {
                     // default when printing to a tty for human consumption,
                     // except for one interesting case: when we're only
                     // searching stdin. This makes pipelines work as expected.
-                    (state.is_terminal_stdout && !paths.is_only_stdin())
+                    (state.is_output_terminal && !paths.is_only_stdin())
                         || column
                         || low.vimgrep
                 }
@@ -279,7 +293,7 @@ impl HiArgs {
             ignore_file_case_insensitive: low.ignore_file_case_insensitive,
             include_zero: low.include_zero,
             invert_match: low.invert_match,
-            is_terminal_stdout: state.is_terminal_stdout,
+            is_output_terminal: state.is_output_terminal,
             line_number,
             max_columns: low.max_columns,
             max_columns_preview: low.max_columns_preview,
@@ -305,6 +319,7 @@ impl HiArgs {
             globs,
             path_separator: low.path_separator,
             path_terminator,
+            post,
             pre: low.pre,
             pre_globs,
             quiet: low.quiet,
@@ -320,6 +335,7 @@ impl HiArgs {
             types,
             vimgrep: low.vimgrep,
             with_filename,
+            write_to: low.write_to,
         })
     }
 
@@ -560,7 +576,7 @@ impl HiArgs {
     ///
     /// This chooses which printer to build (JSON, summary or standard) based
     /// on the search mode given.
-    pub(crate) fn printer<W: termcolor::WriteColor>(
+    pub(crate) fn printer<W: WritePath>(
         &self,
         search_mode: SearchMode,
         wtr: W,
@@ -687,7 +703,7 @@ impl HiArgs {
     ///
     /// Search results are found using the given matcher and written to the
     /// given printer.
-    pub(crate) fn search_worker<W: termcolor::WriteColor>(
+    pub(crate) fn search_worker<W: WritePath>(
         &self,
         matcher: PatternMatcher,
         searcher: grep::searcher::Searcher,
@@ -832,7 +848,7 @@ impl HiArgs {
         let color = self.color.to_termcolor();
         match self.buffer {
             BufferMode::Auto => {
-                if self.is_terminal_stdout {
+                if self.is_output_terminal {
                     grep::cli::stdout_buffered_line(color)
                 } else {
                     grep::cli::stdout_buffered_block(color)
@@ -841,6 +857,19 @@ impl HiArgs {
             BufferMode::Line => grep::cli::stdout_buffered_line(color),
             BufferMode::Block => grep::cli::stdout_buffered_block(color),
         }
+    }
+
+    pub(crate) fn output<'a, W: WriteColor>(
+        &'a self,
+        stdout: W,
+    ) -> anyhow::Result<Output<'a, W>> {
+        Ok(Output::new(
+            stdout,
+            self.post.as_deref(),
+            self.write_to.as_deref(),
+            matches!(self.buffer, BufferMode::Auto | BufferMode::Block), // Buffer output to postrocessor/file unless user explicitly requested line buffering
+            matches!(self.color, ColorChoice::Always | ColorChoice::Ansi), // Only colour output to postprocessor/file if user explicitly requested it
+        ))
     }
 
     /// Returns the total number of threads ripgrep should use to execute a
@@ -932,7 +961,7 @@ struct State {
     /// Whether it's believed that tty is connected to stdout. Note that on
     /// unix systems, this is always correct. On Windows, heuristics are used
     /// by Rust's standard library, particularly for cygwin/MSYS environments.
-    is_terminal_stdout: bool,
+    is_output_terminal: bool,
     /// Whether stdin has already been consumed. This is useful to know and for
     /// providing good error messages when the user has tried to read from stdin
     /// in two different places. For example, `rg -f - -`.
@@ -946,11 +975,11 @@ impl State {
     ///
     /// Note that the state values may change throughout the lifetime of
     /// argument parsing.
-    fn new() -> anyhow::Result<State> {
+    fn new(to_stdout: bool) -> anyhow::Result<State> {
         use std::io::IsTerminal;
 
         Ok(State {
-            is_terminal_stdout: std::io::stdout().is_terminal(),
+            is_output_terminal: to_stdout && std::io::stdout().is_terminal(),
             stdin_consumed: false,
             cwd: current_dir()?,
         })
