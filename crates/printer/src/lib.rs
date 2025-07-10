@@ -27,7 +27,7 @@ This example shows how to create a "standard" printer and execute a search.
 ```
 use {
     grep_regex::RegexMatcher,
-    grep_printer::Standard,
+    grep_printer_write::Standard,
     grep_searcher::Searcher,
 };
 

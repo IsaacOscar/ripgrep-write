@@ -165,7 +165,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "grep-printer"
+name = "grep-printer-write"
 version = "0.2.2"
 dependencies = [
  "bstr",
@@ -211,7 +211,7 @@ dependencies = [
  "grep-cli",
  "grep-matcher",
  "grep-pcre2",
- "grep-printer",
+ "grep-printer-write",
  "grep-regex",
  "grep-searcher",
  "termcolor",

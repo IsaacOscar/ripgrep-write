@@ -135,7 +135,7 @@ pub struct ColorSpecs {
 /// ```rust
 /// # fn main() {
 /// use termcolor::{Color, ColorSpec};
-/// use grep_printer::UserColorSpec;
+/// use grep_printer_write::UserColorSpec;
 ///
 /// let user_spec1: UserColorSpec = "path:fg:blue".parse().unwrap();
 /// let user_spec2: UserColorSpec = "match:bg:0xff,0x7f,0x00".parse().unwrap();
