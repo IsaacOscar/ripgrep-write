@@ -1,7 +1,7 @@
 use std::{env, error::Error, ffi::OsString, io::IsTerminal, process};
 
 use {
-    grep::{
+    grep_write::{
         cli,
         printer::{ColorSpecs, StandardBuilder},
         regex::RegexMatcher,

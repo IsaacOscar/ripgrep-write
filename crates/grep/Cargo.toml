@@ -1,13 +1,13 @@
 [package]
-name = "grep"
+name = "grep-write"
 version = "0.3.2"  #:version
-authors = ["Andrew Gallant <jamslam@gmail.com>"]
+authors = ["Isaac Oscar Gariano <IsaacOscar@live.com.au>", "Andrew Gallant <jamslam@gmail.com>"]
 description = """
-Fast line oriented regex searching as a library.
+A modified version of the grep crate for use by ripgrep-write.
 """
 documentation = "https://docs.rs/grep"
-homepage = "https://github.com/BurntSushi/ripgrep/tree/master/crates/grep"
-repository = "https://github.com/BurntSushi/ripgrep/tree/master/crates/grep"
+homepage = "https://github.com/IsaacOscar/ripgrep-write/tree/master/crates/grep"
+repository = "https://github.com/IsaacOscar/ripgrep-write/tree/master/crates/grep"
 readme = "README.md"
 keywords = ["regex", "grep", "egrep", "search", "pattern"]
 license = "Unlicense OR MIT"
