@@ -136,20 +136,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grep"
-version = "0.3.2"
-dependencies = [
- "grep-cli",
- "grep-matcher",
- "grep-pcre2",
- "grep-printer",
- "grep-regex",
- "grep-searcher",
- "termcolor",
- "walkdir",
-]
-
-[[package]]
 name = "grep-cli"
 version = "0.1.11"
 dependencies = [
@@ -216,6 +202,20 @@ dependencies = [
  "memchr",
  "memmap2",
  "regex",
+]
+
+[[package]]
+name = "grep-write"
+version = "0.3.2"
+dependencies = [
+ "grep-cli",
+ "grep-matcher",
+ "grep-pcre2",
+ "grep-printer",
+ "grep-regex",
+ "grep-searcher",
+ "termcolor",
+ "walkdir",
 ]
 
 [[package]]
@@ -390,7 +390,7 @@ version = "14.1.1"
 dependencies = [
  "anyhow",
  "bstr",
- "grep",
+ "grep-write",
  "ignore",
  "jemallocator",
  "lexopt",
