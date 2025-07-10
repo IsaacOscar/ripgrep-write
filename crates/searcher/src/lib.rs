@@ -41,8 +41,8 @@ using the [`UTF8`](sinks::UTF8) implementation of `Sink`.
 use {
     grep_matcher::Matcher,
     grep_regex::RegexMatcher,
-    grep_searcher::Searcher,
-    grep_searcher::sinks::UTF8,
+    grep_searcher_write::Searcher,
+    grep_searcher_write::sinks::UTF8,
 };
 
 const SHERLOCK: &'static [u8] = b"\
