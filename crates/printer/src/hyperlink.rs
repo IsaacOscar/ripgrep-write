@@ -56,7 +56,7 @@ impl HyperlinkConfig {
 /// # Example
 ///
 /// ```
-/// use grep_printer::HyperlinkFormat;
+/// use grep_printer_write::HyperlinkFormat;
 ///
 /// let fmt = "vscode".parse::<HyperlinkFormat>()?;
 /// assert_eq!(fmt.to_string(), "vscode://file{path}:{line}:{column}");
