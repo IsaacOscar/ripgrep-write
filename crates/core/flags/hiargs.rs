@@ -80,6 +80,7 @@ pub(crate) struct HiArgs {
     no_ignore_parent: bool,
     no_ignore_vcs: bool,
     no_require_git: bool,
+    no_strip_bom: bool,
     no_unicode: bool,
     null_data: bool,
     one_file_system: bool,
@@ -296,6 +297,7 @@ impl HiArgs {
             no_ignore_parent: low.no_ignore_parent,
             no_ignore_vcs: low.no_ignore_vcs,
             no_require_git: low.no_require_git,
+            no_strip_bom: low.no_strip_bom,
             no_unicode: low.no_unicode,
             null_data: low.null_data,
             one_file_system: low.one_file_system,
@@ -737,6 +739,7 @@ impl HiArgs {
                 builder.bom_sniffing(false);
             }
         }
+        builder.strip_bom(!self.no_strip_bom);
         Ok(builder.build())
     }
 

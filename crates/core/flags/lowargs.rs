@@ -87,6 +87,7 @@ pub(crate) struct LowArgs {
     pub(crate) no_ignore_vcs: bool,
     pub(crate) no_messages: bool,
     pub(crate) no_require_git: bool,
+    pub(crate) no_strip_bom: bool,
     pub(crate) no_unicode: bool,
     pub(crate) null: bool,
     pub(crate) null_data: bool,

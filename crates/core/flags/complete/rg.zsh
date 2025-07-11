@@ -166,6 +166,10 @@ _rg() {
     "--no-require-git[don't require git repository to respect gitignore rules]"
     $no'--require-git[require git repository to respect gitignore rules]'
 
+	+ '(strip_bom)' # BOM strip options
+    "--no-strip-bom[don't strip byte-order marks]"
+    $no'--strip-bom[strip byte-order marks]'
+
     + '(ignore-dot)' # .ignore options
     "--no-ignore-dot[don't respect .ignore files]"
     $no'--ignore-dot[respect .ignore files]'

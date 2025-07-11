@@ -110,6 +110,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &NoIgnoreVcs,
     &NoMessages,
     &NoRequireGit,
+    &NoStripBom,
     &NoUnicode,
     &Null,
     &NullData,
@@ -1574,7 +1575,7 @@ this case only applies to files that begin with a UTF-8 or UTF-16 byte-order
 mark (BOM). No other automatic detection is performed. One can also specify
 \fBnone\fP which will then completely disable BOM sniffing and always result
 in searching the raw bytes, including a BOM if it's present, regardless of its
-encoding.
+encoding (i.e. \flag{no-strip-bom} is implied).
 .sp
 Other supported values can be found in the list of labels here:
 \fIhttps://encoding.spec.whatwg.org/#concept-encoding-get\fP.
@@ -1606,6 +1607,9 @@ via the \flag-negate{encoding} flag.
             "none" => EncodingMode::Disabled,
             _ => EncodingMode::Some(grep::searcher::Encoding::new(label)?),
         };
+        if label == "none" {
+            args.no_strip_bom = true
+        };
         Ok(())
     }
 }
@@ -1621,21 +1625,27 @@ fn test_encoding() {
 
     let args = parse_low_raw(["--encoding", "none"]).unwrap();
     assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(false, args.no_strip_bom);
 
     let args = parse_low_raw(["--encoding=none"]).unwrap();
     assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(false, args.no_strip_bom);
 
     let args = parse_low_raw(["-E", "none"]).unwrap();
     assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(false, args.no_strip_bom);
 
     let args = parse_low_raw(["-Enone"]).unwrap();
     assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(false, args.no_strip_bom);
 
     let args = parse_low_raw(["-E", "none", "--no-encoding"]).unwrap();
     assert_eq!(EncodingMode::Auto, args.encoding);
+    assert_eq!(false, args.no_strip_bom); // Because -E None implied it
 
     let args = parse_low_raw(["--no-encoding", "-E", "none"]).unwrap();
     assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(false, args.no_strip_bom);
 
     let args = parse_low_raw(["-E", "utf-16"]).unwrap();
     let enc = grep::searcher::Encoding::new("utf-16").unwrap();
@@ -4826,6 +4836,55 @@ fn test_no_require_git() {
 
     let args = parse_low_raw(["--no-require-git", "--require-git"]).unwrap();
     assert_eq!(false, args.no_require_git);
+}
+
+/// --no-strip-bom
+#[derive(Debug)]
+struct NoStripBom;
+
+impl Flag for NoStripBom {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_long(&self) -> &'static str {
+        "no-strip-bom"
+    }
+    fn name_negated(&self) -> Option<&'static str> {
+        Some("strip-bom")
+    }
+    fn doc_category(&self) -> Category {
+        Category::Output
+    }
+    fn doc_short(&self) -> &'static str {
+        r"Do not strip file BOM's when matching and printing."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+When this flag is given, any byte-order mark (BOM) at the start of the file is
+not striped, thus it can be matched against and will be printed. Note that this does
+not affect BOM sniffing (see the description for the \flag{encoding} flag).
+.sp
+This options is disabled by default, unless \fBencoding=none\fP was given.
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        args.no_require_git = v.unwrap_switch();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_no_strip_bom() {
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(false, args.no_strip_bom);
+
+    let args = parse_low_raw(["--no-strip-bom"]).unwrap();
+    assert_eq!(true, args.no_strip_bom);
+
+    let args = parse_low_raw(["--no-strip-bom", "--strip-bom"]).unwrap();
+    assert_eq!(false, args.no_strip_bom);
 }
 
 /// --no-unicode

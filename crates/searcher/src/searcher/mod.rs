@@ -180,6 +180,8 @@ pub struct Config {
     /// Whether to stop searching when a non-matching line is found after a
     /// matching line.
     stop_on_nonmatch: bool,
+    /// Whether to strip the input's BOM (if present)
+    strip_bom: bool,
 }
 
 impl Default for Config {
@@ -198,6 +200,7 @@ impl Default for Config {
             encoding: None,
             bom_sniffing: true,
             stop_on_nonmatch: false,
+            strip_bom: true,
         }
     }
 }
@@ -320,7 +323,7 @@ impl SearcherBuilder {
         decode_builder
             .encoding(self.config.encoding.as_ref().map(|e| e.0))
             .utf8_passthru(true)
-            .strip_bom(self.config.bom_sniffing)
+            .strip_bom(self.config.strip_bom)
             .bom_override(true)
             .bom_sniffing(self.config.bom_sniffing);
 
@@ -544,7 +547,7 @@ impl SearcherBuilder {
     ///
     /// When this is disabled and if an explicit encoding is not set, then
     /// the bytes from the source stream will be passed through unchanged,
-    /// including its BOM, if one is present.
+    /// except it's BOM may be striped if `strip_bom` is set.
     ///
     /// This is enabled by default.
     pub fn bom_sniffing(&mut self, yes: bool) -> &mut SearcherBuilder {
@@ -562,6 +565,15 @@ impl SearcherBuilder {
         stop_on_nonmatch: bool,
     ) -> &mut SearcherBuilder {
         self.config.stop_on_nonmatch = stop_on_nonmatch;
+        self
+    }
+
+    /// Whether to strip the input's BOM (if any present). This prevents it from
+    /// being matches, as well as printed.
+    ///
+    /// This is enabled by default.
+    pub fn strip_bom(&mut self, strip_bom: bool) -> &mut SearcherBuilder {
+        self.config.strip_bom = strip_bom;
         self
     }
 }
@@ -1050,5 +1062,20 @@ mod tests {
 
         let sink_output = String::from_utf8(sink.as_bytes().to_vec()).unwrap();
         assert_eq!(sink_output, "1:0:foo\nbyte count:3\n");
+    }
+
+    #[test]
+    fn uft8_no_strip_bom() {
+        let matcher = RegexMatcher::new("foo");
+        let haystack: &[u8] = &[0xef, 0xbb, 0xbf, 0x66, 0x6f, 0x6f];
+
+        let mut sink = KitchenSink::new();
+        let mut searcher = SearcherBuilder::new().strip_bom(false).build();
+
+        let res = searcher.search_slice(matcher, haystack, &mut sink);
+        assert!(res.is_ok());
+
+        let sink_output = String::from_utf8(sink.as_bytes().to_vec()).unwrap();
+        assert_eq!(sink_output, "1:0:\u{feff}foo\nbyte count:6\n");
     }
 }
