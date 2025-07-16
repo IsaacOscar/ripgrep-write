@@ -64,6 +64,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &DfaSizeLimit,
     &Encoding,
     &Engine,
+    &EnsureNoBinary,
     &FieldContextSeparator,
     &FieldMatchSeparator,
     &Files,
@@ -1739,6 +1740,60 @@ fn test_engine() {
     let args =
         parse_low_raw(["--engine=pcre2", "--no-auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Default, args.engine);
+}
+
+/// --ignore-binary
+#[derive(Debug)]
+struct EnsureNoBinary;
+
+impl Flag for EnsureNoBinary {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_long(&self) -> &'static str {
+        "ensure-no-binary"
+    }
+    fn doc_category(&self) -> Category {
+        Category::Filter
+    }
+    fn doc_short(&self) -> &'static str {
+        "Ensure binary files are not searched."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+TODO: Document,
+this is like \flag{no-binary}, but extra strict
+
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        assert!(v.unwrap_switch(), "--ensure-no-binary has no negation");
+        args.binary = BinaryMode::EnsureIgnored;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_ensure_no_binary() {
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(BinaryMode::Auto, args.binary);
+
+    let args = parse_low_raw(["--ensure-no-binary"]).unwrap();
+    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
+
+    let args = parse_low_raw(["--ensure-no-binary", "--no-binary"]).unwrap();
+    assert_eq!(BinaryMode::Auto, args.binary);
+
+    let args = parse_low_raw(["--ensure-no-binary", "--binary"]).unwrap();
+    assert_eq!(BinaryMode::SearchAndSuppress, args.binary);
+
+    let args = parse_low_raw(["--ensure-no-binary", "-a"]).unwrap();
+    assert_eq!(BinaryMode::AsText, args.binary);
+
+    let args = parse_low_raw(["-a", "--ensure-no-binary"]).unwrap();
+    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
 }
 
 /// --field-context-separator

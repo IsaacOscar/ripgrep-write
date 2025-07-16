@@ -626,7 +626,8 @@ impl HiArgs {
             .separator_path(self.path_separator.clone())
             .stats(self.stats.is_some())
             .trim_ascii(self.trim)
-            .ensure_eol(!self.no_ensure_eol);
+            .ensure_eol(!self.no_ensure_eol)
+            .ensure_no_binary(self.binary.is_ignored());
         // When doing multi-threaded searching, the buffer writer is
         // responsible for writing separators since it is the only thing that
         // knows whether something has been printed or not. But for the single
@@ -656,6 +657,7 @@ impl HiArgs {
             .separator_field(b":".to_vec())
             .separator_path(self.path_separator.clone())
             .stats(self.stats.is_some())
+            .ensure_no_binary(self.binary.is_ignored())
             .build(wtr)
     }
 
@@ -1153,8 +1155,11 @@ impl BinaryDetection {
     fn from_low_args(_: &State, low: &LowArgs) -> BinaryDetection {
         let none = matches!(low.binary, BinaryMode::AsText) || low.null_data;
         let convert = matches!(low.binary, BinaryMode::SearchAndSuppress);
+        let ignored = matches!(low.binary, BinaryMode::EnsureIgnored);
         let explicit = if none {
             grep::searcher::BinaryDetection::none()
+        } else if ignored {
+            grep::searcher::BinaryDetection::quit(b'\x00')
         } else {
             grep::searcher::BinaryDetection::convert(b'\x00')
         };
@@ -1173,6 +1178,13 @@ impl BinaryDetection {
     pub(crate) fn is_none(&self) -> bool {
         let none = grep::searcher::BinaryDetection::none();
         self.explicit == none && self.implicit == none
+    }
+
+    /// Returns true when both implicit and explicit binary files
+    /// are to be ignored.
+    pub(crate) fn is_ignored(&self) -> bool {
+        let quit = grep::searcher::BinaryDetection::quit(b'\x00');
+        self.explicit == quit && self.implicit == quit
     }
 }
 

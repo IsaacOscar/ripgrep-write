@@ -13,8 +13,8 @@ use {
 };
 
 use crate::{
+    cancellable_writer::CancellableWriter,
     color::ColorSpecs,
-    counter::CounterWriter,
     hyperlink::{self, HyperlinkConfig},
     stats::Stats,
     util::{find_iter_at_in_context, PrinterPath},
@@ -37,6 +37,7 @@ struct Config {
     separator_field: Arc<Vec<u8>>,
     separator_path: Option<u8>,
     path_terminator: Option<u8>,
+    ensure_no_binary: bool,
 }
 
 impl Default for Config {
@@ -52,6 +53,7 @@ impl Default for Config {
             separator_field: Arc::new(b":".to_vec()),
             separator_path: None,
             path_terminator: None,
+            ensure_no_binary: false,
         }
     }
 }
@@ -168,7 +170,10 @@ impl SummaryBuilder {
     pub fn build<W: WriteColor>(&self, wtr: W) -> Summary<W> {
         Summary {
             config: self.config.clone(),
-            wtr: RefCell::new(CounterWriter::new(wtr)),
+            wtr: RefCell::new(CancellableWriter::new(
+                wtr,
+                self.config.ensure_no_binary,
+            )),
         }
     }
 
@@ -336,6 +341,12 @@ impl SummaryBuilder {
         self.config.path_terminator = terminator;
         self
     }
+
+    /// Whether to ensure that results for binary files are never printed
+    pub fn ensure_no_binary(&mut self, ensure: bool) -> &mut SummaryBuilder {
+        self.config.ensure_no_binary = ensure;
+        self
+    }
 }
 
 /// The summary printer, which emits aggregate results from a search.
@@ -351,9 +362,9 @@ impl SummaryBuilder {
 /// This type is generic over `W`, which represents any implementation of
 /// the `termcolor::WriteColor` trait.
 #[derive(Clone, Debug)]
-pub struct Summary<W> {
+pub struct Summary<W: WriteColor> {
     config: Config,
-    wtr: RefCell<CounterWriter<W>>,
+    wtr: RefCell<CancellableWriter<W>>,
 }
 
 impl<W: WriteColor> Summary<W> {
@@ -412,6 +423,8 @@ impl<W: WriteColor> Summary<W> {
             match_count: 0,
             binary_byte_offset: None,
             stats,
+            stats_match_count: 0,
+            stats_matched_line_count: 0,
         }
     }
 
@@ -449,15 +462,17 @@ impl<W: WriteColor> Summary<W> {
             match_count: 0,
             binary_byte_offset: None,
             stats,
+            stats_match_count: 0,
+            stats_matched_line_count: 0,
         }
     }
 }
 
-impl<W> Summary<W> {
+impl<W: WriteColor> Summary<W> {
     /// Returns true if and only if this printer has written at least one byte
     /// to the underlying writer during any of the previous searches.
     pub fn has_written(&self) -> bool {
-        self.wtr.borrow().total_count() > 0
+        self.wtr.borrow().has_written()
     }
 
     /// Return a mutable reference to the underlying writer.
@@ -486,7 +501,7 @@ impl<W> Summary<W> {
 /// * `W` refers to the underlying writer that this printer is writing its
 /// output to.
 #[derive(Debug)]
-pub struct SummarySink<'p, 's, M: Matcher, W> {
+pub struct SummarySink<'p, 's, M: Matcher, W: WriteColor> {
     matcher: M,
     summary: &'s mut Summary<W>,
     interpolator: hyperlink::Interpolator,
@@ -495,6 +510,8 @@ pub struct SummarySink<'p, 's, M: Matcher, W> {
     match_count: u64,
     binary_byte_offset: Option<u64>,
     stats: Option<Stats>,
+    stats_match_count: u64,
+    stats_matched_line_count: u64,
 }
 
 impl<'p, 's, M: Matcher, W: WriteColor> SummarySink<'p, 's, M, W> {
@@ -549,7 +566,11 @@ impl<'p, 's, M: Matcher, W: WriteColor> SummarySink<'p, 's, M, W> {
     /// This implements the logic for handling quitting after seeing a certain
     /// amount of matches. In most cases, the logic is simple, but we must
     /// permit all "after" contextual lines to print after reaching the limit.
+    /// Note that we must not quit if we still need to check if the file is binary or not
     fn should_quit(&self) -> bool {
+        if self.summary.config.ensure_no_binary {
+            return false;
+        }
         let limit = match self.summary.config.max_matches {
             None => return false,
             Some(limit) => limit,
@@ -679,10 +700,12 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
         } else {
             self.match_count += 1;
         }
-        if let Some(ref mut stats) = self.stats {
-            stats.add_matches(sink_match_count);
-            stats.add_matched_lines(mat.lines().count() as u64);
-        } else if self.summary.config.kind.quit_early() {
+        if self.stats.is_some() {
+            self.stats_match_count += sink_match_count;
+            self.stats_matched_line_count += mat.lines().count() as u64;
+        } else if !self.summary.config.ensure_no_binary
+            && self.summary.config.kind.quit_early()
+        {
             return Ok(false);
         }
         Ok(!self.should_quit())
@@ -712,10 +735,12 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
                 self.summary.config.kind,
             )));
         }
-        self.summary.wtr.borrow_mut().reset_count();
+        self.summary.wtr.borrow_mut().reset_state();
         self.start_time = Instant::now();
         self.match_count = 0;
         self.binary_byte_offset = None;
+        self.stats_match_count = 0;
+        self.stats_matched_line_count = 0;
         if self.summary.config.max_matches == Some(0) {
             return Ok(false);
         }
@@ -729,6 +754,13 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
         finish: &SinkFinish,
     ) -> Result<(), io::Error> {
         self.binary_byte_offset = finish.binary_byte_offset();
+        if self.summary.config.ensure_no_binary
+            && self.binary_byte_offset.is_some()
+        {
+            self.summary.wtr.borrow_mut().cancel();
+        }
+        self.summary.wtr.borrow_mut().commit()?;
+
         if let Some(ref mut stats) = self.stats {
             stats.add_elapsed(self.start_time.elapsed());
             stats.add_searches(1);
@@ -760,11 +792,11 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
         if self.binary_byte_offset.is_some()
             && searcher.binary_detection().quit_byte().is_some()
         {
-            // Squash the match count. The statistics reported will still
-            // contain the match count, but the "official" match count should
-            // be zero.
             self.match_count = 0;
             return Ok(());
+        } else if let Some(ref mut stats) = self.stats {
+            stats.add_matches(self.stats_match_count);
+            stats.add_matched_lines(self.stats_matched_line_count);
         }
 
         let show_count =
@@ -1162,5 +1194,57 @@ and exhibited clearly, with a label attached.
         // after finding the first one, but since we request stats, it will
         // mush on to find all matches.
         assert_eq!(3, match_count);
+    }
+
+    #[test]
+    fn ensure_no_binary() {
+        let matcher = RegexMatcher::new(".").unwrap();
+        let searcher = SearcherBuilder::new()
+            .line_number(false)
+            .binary_detection(grep_searcher::BinaryDetection::quit(b'\x00'))
+            .build();
+
+        for ensure_no_binary in [true, false] {
+            for kind in [SummaryKind::PathWithMatch, SummaryKind::Quiet] {
+                println!("{ensure_no_binary} {kind:?}");
+                // Enabling stats causes the the entire file to be searched regardless of ensure_no_binary
+                let mut printer = SummaryBuilder::new()
+                    .kind(kind)
+                    .ensure_no_binary(ensure_no_binary)
+                    .build(NoColor::new(vec![]));
+                let mut sink = printer.sink_with_path(&matcher, "File1");
+                let mut searcher = searcher.clone();
+                searcher
+                    .search_reader(&matcher, &b"X\n\n\x00Y"[..], &mut sink)
+                    .unwrap();
+
+                if ensure_no_binary {
+                    assert_eq!(sink.binary_byte_offset(), Some(3));
+                    assert_eq!(sink.has_match(), false);
+                } else {
+                    assert_eq!(sink.binary_byte_offset(), None);
+                    assert_eq!(sink.has_match(), true);
+                }
+
+                let mut sink = printer.sink_with_path(&matcher, "File2");
+                searcher
+                    .search_reader(&matcher, &b"Z\n\n"[..], &mut sink)
+                    .unwrap();
+                assert_eq!(sink.binary_byte_offset(), None);
+                assert_eq!(sink.has_match(), true);
+
+                let got = printer_contents(&mut printer);
+                let expected = if kind == SummaryKind::PathWithMatch {
+                    if ensure_no_binary {
+                        "File2\n"
+                    } else {
+                        "File1\nFile2\n"
+                    }
+                } else {
+                    ""
+                };
+                assert_eq_printed!(expected, got);
+            }
+        }
     }
 }

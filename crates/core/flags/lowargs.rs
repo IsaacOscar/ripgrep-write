@@ -250,6 +250,9 @@ pub(crate) enum BinaryMode {
     /// Treat all files as if they were plain text. There's no skipping and no
     /// replacement of `NUL` bytes with line terminators.
     AsText,
+    /// TODO: document, a stricter version of AUTO
+    /// Explicit files are ignored, and it always suceeds at skipping binary files
+    EnsureIgnored,
 }
 
 impl Default for BinaryMode {

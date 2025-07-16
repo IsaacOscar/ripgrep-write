@@ -18,8 +18,8 @@ use {
 };
 
 use crate::{
+    cancellable_writer::CancellableWriter,
     color::ColorSpecs,
-    counter::CounterWriter,
     hyperlink::{self, HyperlinkConfig},
     stats::Stats,
     util::{
@@ -57,6 +57,7 @@ struct Config {
     separator_path: Option<u8>,
     path_terminator: Option<u8>,
     ensure_eol: bool,
+    ensure_no_binary: bool,
 }
 
 impl Default for Config {
@@ -84,6 +85,7 @@ impl Default for Config {
             separator_path: None,
             path_terminator: None,
             ensure_eol: true,
+            ensure_no_binary: false,
         }
     }
 }
@@ -132,7 +134,10 @@ impl StandardBuilder {
     pub fn build<W: WriteColor>(&self, wtr: W) -> Standard<W> {
         Standard {
             config: self.config.clone(),
-            wtr: RefCell::new(CounterWriter::new(wtr)),
+            wtr: RefCell::new(CancellableWriter::new(
+                wtr,
+                self.config.ensure_no_binary,
+            )),
             matches: vec![],
         }
     }
@@ -483,6 +488,12 @@ impl StandardBuilder {
         self.config.ensure_eol = ensure;
         self
     }
+
+    /// Whether to ensure that results for binary files are never printed
+    pub fn ensure_no_binary(&mut self, ensure: bool) -> &mut StandardBuilder {
+        self.config.ensure_no_binary = ensure;
+        self
+    }
 }
 
 /// The standard printer, which implements grep-like formatting, including
@@ -499,9 +510,9 @@ impl StandardBuilder {
 /// the `termcolor::NoColor` adapter can be used to wrap any `io::Write`
 /// implementation without enabling any colors.
 #[derive(Clone, Debug)]
-pub struct Standard<W> {
+pub struct Standard<W: WriteColor> {
     config: Config,
-    wtr: RefCell<CounterWriter<W>>,
+    wtr: RefCell<CancellableWriter<W>>,
     matches: Vec<Match>,
 }
 
@@ -553,6 +564,8 @@ impl<W: WriteColor> Standard<W> {
             after_context_remaining: 0,
             binary_byte_offset: None,
             stats,
+            stats_match_count: 0,
+            stats_matched_line_count: 0,
             needs_match_granularity,
         }
     }
@@ -590,6 +603,8 @@ impl<W: WriteColor> Standard<W> {
             after_context_remaining: 0,
             binary_byte_offset: None,
             stats,
+            stats_match_count: 0,
+            stats_matched_line_count: 0,
             needs_match_granularity,
         }
     }
@@ -618,11 +633,11 @@ impl<W: WriteColor> Standard<W> {
     }
 }
 
-impl<W> Standard<W> {
+impl<W: WriteColor> Standard<W> {
     /// Returns true if and only if this printer has written at least one byte
     /// to the underlying writer during any of the previous searches.
     pub fn has_written(&self) -> bool {
-        self.wtr.borrow().total_count() > 0
+        self.wtr.borrow().has_written()
     }
 
     /// Return a mutable reference to the underlying writer.
@@ -660,7 +675,7 @@ impl<W> Standard<W> {
 /// * `W` refers to the underlying writer that this printer is writing its
 /// output to.
 #[derive(Debug)]
-pub struct StandardSink<'p, 's, M: Matcher, W> {
+pub struct StandardSink<'p, 's, M: Matcher, W: WriteColor> {
     matcher: M,
     standard: &'s mut Standard<W>,
     replacer: Replacer<M>,
@@ -671,6 +686,8 @@ pub struct StandardSink<'p, 's, M: Matcher, W> {
     after_context_remaining: u64,
     binary_byte_offset: Option<u64>,
     stats: Option<Stats>,
+    stats_match_count: u64,
+    stats_matched_line_count: u64,
     needs_match_granularity: bool,
 }
 
@@ -788,10 +805,17 @@ impl<'p, 's, M: Matcher, W: WriteColor> StandardSink<'p, 's, M, W> {
 
     /// Returns true if this printer should quit.
     ///
-    /// This implements the logic for handling quitting after seeing a certain
+    /// This must return false if we still need to check if the file is binary or not.
+    fn should_quit(&self) -> bool {
+        !self.standard.config.ensure_no_binary && self.should_stop_printing()
+    }
+
+    /// Returns true if this printer should stop printing.
+    ///
+    /// This implements the logic for handling printing after seeing a certain
     /// amount of matches. In most cases, the logic is simple, but we must
     /// permit all "after" contextual lines to print after reaching the limit.
-    fn should_quit(&self) -> bool {
+    fn should_stop_printing(&self) -> bool {
         let limit = match self.standard.config.max_matches {
             None => return false,
             Some(limit) => limit,
@@ -821,6 +845,9 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         searcher: &Searcher,
         mat: &SinkMatch<'_>,
     ) -> Result<bool, io::Error> {
+        if self.should_stop_printing() {
+            return Ok(true);
+        }
         self.match_count += 1;
         // When we've exceeded our match count, then the remaining context
         // lines should not be reset, but instead, decremented. This avoids a
@@ -843,10 +870,10 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         )?;
         self.replace(searcher, mat.buffer(), mat.bytes_range_in_buffer())?;
 
-        if let Some(ref mut stats) = self.stats {
-            stats.add_matches(self.standard.matches.len() as u64);
-            stats.add_matched_lines(mat.lines().count() as u64);
-        }
+        // For stats
+        self.stats_match_count += self.standard.matches.len() as u64;
+        self.stats_matched_line_count += mat.lines().count() as u64;
+
         if searcher.binary_detection().convert_byte().is_some() {
             if self.binary_byte_offset.is_some() {
                 return Ok(false);
@@ -862,6 +889,9 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         searcher: &Searcher,
         ctx: &SinkContext<'_>,
     ) -> Result<bool, io::Error> {
+        if self.should_stop_printing() {
+            return Ok(true);
+        }
         self.standard.matches.clear();
         self.replacer.clear();
 
@@ -905,16 +935,25 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
                 );
             }
         }
+        if self.standard.config.ensure_no_binary {
+            self.standard.wtr.borrow_mut().cancel();
+            // Forget if we made any matches
+            self.match_count = 0;
+            self.stats_match_count = 0;
+            self.stats_matched_line_count = 0;
+        }
         self.binary_byte_offset = Some(binary_byte_offset);
         Ok(true)
     }
 
     fn begin(&mut self, _searcher: &Searcher) -> Result<bool, io::Error> {
-        self.standard.wtr.borrow_mut().reset_count();
+        self.standard.wtr.borrow_mut().reset_state();
         self.start_time = Instant::now();
         self.match_count = 0;
         self.after_context_remaining = 0;
         self.binary_byte_offset = None;
+        self.stats_match_count = 0;
+        self.stats_matched_line_count = 0;
         if self.standard.config.max_matches == Some(0) {
             return Ok(false);
         }
@@ -929,7 +968,11 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         if let Some(offset) = self.binary_byte_offset {
             StandardImpl::new(searcher, self).write_binary_message(offset)?;
         }
+        self.standard.wtr.borrow_mut().commit()?;
         if let Some(stats) = self.stats.as_mut() {
+            stats.add_matches(self.stats_match_count);
+            stats.add_matched_lines(self.stats_matched_line_count);
+
             stats.add_elapsed(self.start_time.elapsed());
             stats.add_searches(1);
             if self.match_count > 0 {
@@ -948,7 +991,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
 /// A StandardImpl is initialized every time a match or a contextual line is
 /// reported.
 #[derive(Debug)]
-struct StandardImpl<'a, M: Matcher, W> {
+struct StandardImpl<'a, M: Matcher, W: WriteColor> {
     searcher: &'a Searcher,
     sink: &'a StandardSink<'a, 'a, M, W>,
     sunk: Sunk<'a>,
@@ -1454,8 +1497,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
             return Ok(());
         }
         if let Some(ref sep) = *self.config().separator_search {
-            let ever_written = self.wtr().borrow().total_count() > 0;
-            if ever_written {
+            if self.wtr().borrow().has_written() {
                 self.write(sep)?;
                 self.write_line_term()?;
             }
@@ -1593,7 +1635,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
     }
 
     /// Return the underlying writer that we are printing to.
-    fn wtr(&self) -> &'a RefCell<CounterWriter<W>> {
+    fn wtr(&self) -> &'a RefCell<CancellableWriter<W>> {
         &self.sink.standard.wtr
     }
 
@@ -1646,7 +1688,7 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
 /// A writer for the prelude (the beginning part of a matching line).
 ///
 /// This encapsulates the state needed to print the prelude.
-struct PreludeWriter<'a, M: Matcher, W> {
+struct PreludeWriter<'a, M: Matcher, W: WriteColor> {
     std: &'a StandardImpl<'a, M, W>,
     next_separator: PreludeSeparator,
     field_separator: &'a [u8],
@@ -4118,6 +4160,7 @@ but Doctor Watson has to have it taken out for him and \x1b[0m\x1b[1m\x1b[31mdus
             .after_context(usize::MAX)
             .invert_match(true)
             .build();
+
         searcher
             .search_reader(&matcher, not_sherlock.as_bytes(), &mut sink)
             .unwrap();
@@ -4150,5 +4193,85 @@ but Doctor Watson has to have it taken out for him and \x1b[0m\x1b[1m\x1b[31mdus
         assert_eq!(stats.bytes_printed(), got.len() as u64);
         assert_eq!(stats.matched_lines(), 5);
         assert_eq!(stats.matches(), 0);
+    }
+
+    #[test]
+    fn ensure_no_binary() {
+        let matcher = RegexMatcher::new(".").unwrap();
+        let searcher = SearcherBuilder::new()
+            .line_number(false)
+            .binary_detection(grep_searcher::BinaryDetection::quit(b'\x00'))
+            .build();
+
+        for ensure_no_binary in [true, false] {
+            for max_matches in [None, Some(1)] {
+                let mut printer = StandardBuilder::new()
+                    .stats(true)
+                    .max_matches(max_matches)
+                    .ensure_no_binary(ensure_no_binary)
+                    .build(NoColor::new(vec![]));
+                let mut sink = printer.sink(&matcher);
+                let mut searcher = searcher.clone();
+                searcher
+                    .search_reader(&matcher, &b"X\n\n\x00Y"[..], &mut sink)
+                    .unwrap();
+                if ensure_no_binary {
+                    assert_eq!(sink.binary_byte_offset(), Some(3));
+                    assert_eq!(sink.has_match(), false);
+                } else if max_matches.is_some() {
+                    assert_eq!(sink.binary_byte_offset(), None);
+                    assert_eq!(sink.has_match(), true);
+                } else {
+                    assert_eq!(sink.binary_byte_offset(), Some(3));
+                    assert_eq!(sink.has_match(), true);
+                }
+
+                searcher
+                    .search_reader(&matcher, &b"Z\n\n"[..], &mut sink)
+                    .unwrap();
+                assert_eq!(sink.binary_byte_offset(), None);
+                assert_eq!(sink.has_match(), true);
+
+                let stats = sink.stats().unwrap().clone();
+                let got = printer_contents(&mut printer);
+                let expected = if ensure_no_binary {
+                    r#"Z
+"#
+                } else if max_matches.is_some() {
+                    r#"X
+Z
+"#
+                } else {
+                    r#"X
+WARNING: stopped searching binary file after match (found "\0" byte around offset 3)
+Z
+"#
+                };
+                assert_eq_printed!(expected, got);
+                assert_eq!(stats.bytes_printed(), got.len() as u64);
+                assert_eq!(stats.searches(), 2);
+                if ensure_no_binary {
+                    assert_eq!(stats.searches_with_match(), 1);
+                    assert_eq!(
+                        stats.bytes_searched(),
+                        (b"X\n\n".len() + b"Z\n\n".len()) as u64
+                    );
+                    assert_eq!(stats.matched_lines(), 1);
+                    assert_eq!(stats.matches(), 1);
+                } else {
+                    assert_eq!(stats.searches_with_match(), 2);
+                    assert_eq!(
+                        stats.bytes_searched(),
+                        if max_matches.is_some() {
+                            0 // It probably shouldn't be zero, but that's what it's returning
+                        } else {
+                            (b"X\n\n".len() + b"Z\n\n".len()) as u64
+                        }
+                    );
+                    assert_eq!(stats.matched_lines(), 2);
+                    assert_eq!(stats.matches(), 2);
+                }
+            }
+        }
     }
 }

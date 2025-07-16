@@ -203,7 +203,7 @@ pub(crate) enum PatternMatcher {
 ///
 /// The `W` type parameter refers to the type of the underlying writer.
 #[derive(Clone, Debug)]
-pub(crate) enum Printer<W> {
+pub(crate) enum Printer<W: WriteColor> {
     /// Use the standard printer, which supports the classic grep-like format.
     Standard(grep::printer::Standard<W>),
     /// Use the summary printer, which supports aggregate displays of search
@@ -230,7 +230,7 @@ impl<W: WriteColor> Printer<W> {
 /// generally intended to be used from a single thread. When searching using
 /// multiple threads, it is better to create a new worker for each thread.
 #[derive(Clone, Debug)]
-pub(crate) struct SearchWorker<W> {
+pub(crate) struct SearchWorker<W: WriteColor> {
     config: Config,
     command_builder: grep::cli::CommandReaderBuilder,
     decomp_builder: grep::cli::DecompressionReaderBuilder,

@@ -89,6 +89,7 @@ const MAX_LOOK_AHEAD: usize = 128;
 #[macro_use]
 mod macros;
 
+mod cancellable_writer;
 mod color;
 mod counter;
 mod hyperlink;
