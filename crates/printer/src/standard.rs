@@ -4058,4 +4058,97 @@ but Doctor Watson has to have it taken out for him and \x1b[0m\x1b[1m\x1b[31mdus
 \x1b[0m\x1b[0m\x1b[1m\x1b[31mand exhibited clearly, with a label attached\x1b[0m.";
         assert_eq_printed!(expected, got);
     }
+
+    #[test]
+    fn passthru_only_matching() {
+        let matcher = RegexMatcher::new(r"Doctor Watson").unwrap();
+        let mut printer =
+            StandardBuilder::new().stats(true).build_no_color(vec![]);
+        let mut sink = printer.sink(&matcher);
+        let not_sherlock = "Some text about Dr Watson";
+        let mut searcher = SearcherBuilder::new()
+            .line_number(true)
+            .before_context(usize::MAX)
+            .after_context(usize::MAX)
+            .build();
+
+        searcher
+            .search_reader(&matcher, not_sherlock.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq!(sink.has_match(), false);
+
+        searcher
+            .search_reader(&matcher, SHERLOCK.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq!(sink.has_match(), true);
+
+        let stats = sink.stats().unwrap().clone();
+        let got = printer_contents(&mut printer);
+        let expected = "\
+1:For the Doctor Watsons of this world, as opposed to the Sherlock
+2-Holmeses, success in the province of detective work must always
+3-be, to a very large extent, the result of luck. Sherlock Holmes
+4-can extract a clew from a wisp of straw or a flake of cigar ash;
+5:but Doctor Watson has to have it taken out for him and dusted,
+6-and exhibited clearly, with a label attached.
+";
+        assert_eq_printed!(expected, got);
+
+        assert_eq!(stats.searches(), 2);
+        assert_eq!(stats.searches_with_match(), 1);
+        assert_eq!(
+            stats.bytes_searched(),
+            (SHERLOCK.len() + not_sherlock.len()) as u64
+        );
+        assert_eq!(stats.bytes_printed(), got.len() as u64);
+        assert_eq!(stats.matched_lines(), 2);
+        assert_eq!(stats.matches(), 2);
+    }
+
+    #[test]
+    fn passthru_only_matching_invert() {
+        let matcher = RegexMatcher::new(r"Doctor Watson").unwrap();
+        let mut printer =
+            StandardBuilder::new().stats(true).build(NoColor::new(vec![]));
+        let mut sink = printer.sink(&matcher);
+        let not_sherlock = "Some text about Dr Watson";
+        let mut searcher = SearcherBuilder::new()
+            .line_number(true)
+            .before_context(usize::MAX)
+            .after_context(usize::MAX)
+            .invert_match(true)
+            .build();
+        searcher
+            .search_reader(&matcher, not_sherlock.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq!(sink.has_match(), true);
+
+        searcher
+            .search_reader(&matcher, SHERLOCK.as_bytes(), &mut sink)
+            .unwrap();
+        assert_eq!(sink.has_match(), true);
+
+        let stats = sink.stats().unwrap().clone();
+        let got = printer_contents(&mut printer);
+        let expected = "\
+1:Some text about Dr Watson
+1-For the Doctor Watsons of this world, as opposed to the Sherlock
+2:Holmeses, success in the province of detective work must always
+3:be, to a very large extent, the result of luck. Sherlock Holmes
+4:can extract a clew from a wisp of straw or a flake of cigar ash;
+5-but Doctor Watson has to have it taken out for him and dusted,
+6:and exhibited clearly, with a label attached.
+";
+        assert_eq_printed!(expected, got);
+
+        assert_eq!(stats.searches(), 2);
+        assert_eq!(stats.searches_with_match(), 2);
+        assert_eq!(
+            stats.bytes_searched(),
+            (SHERLOCK.len() + not_sherlock.len()) as u64
+        );
+        assert_eq!(stats.bytes_printed(), got.len() as u64);
+        assert_eq!(stats.matched_lines(), 5);
+        assert_eq!(stats.matches(), 0);
+    }
 }

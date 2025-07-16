@@ -117,6 +117,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &OnlyMatching,
     &PathSeparator,
     &Passthru,
+    &PassthruOnlyMatching,
     &PCRE2,
     &PCRE2Version,
     &Pre,
@@ -5272,6 +5273,65 @@ fn test_passthru() {
 
     let args = parse_low_raw(["--passthrough"]).unwrap();
     assert_eq!(ContextMode::Passthru, args.context);
+}
+
+/// --passthru-only-matching
+#[derive(Debug)]
+struct PassthruOnlyMatching;
+
+impl Flag for PassthruOnlyMatching {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_long(&self) -> &'static str {
+        "passthru-only-matching"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["passthrough-only-matching"]
+    }
+    fn doc_category(&self) -> Category {
+        Category::Output
+    }
+    fn doc_short(&self) -> &'static str {
+        r"For files that match, print both matching and non-matching lines."
+    }
+    fn doc_long(&self) -> &'static str {
+        (r#"
+TODO: Document
+this is like \fB\-\-context "#
+            .to_owned()
+            + &usize::MAX.to_string()
+            + r#"\fP.
+An alternative spelling for this flag is \fB\-\-passthrough-only-matching\fP.
+.sp
+This overrides the \flag{context}, \flag{after-context} and
+\flag{before-context} flags.
+"#)
+        .leak() // convert to &'static str
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        assert!(v.unwrap_switch(), "--passthru-only-matching has no negation");
+        args.context.set_both(usize::MAX);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_passthru_only_matching() {
+    let mut ctx = ContextMode::default();
+    ctx.set_both(usize::MAX);
+
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(ContextMode::default(), args.context);
+
+    let args = parse_low_raw(["--passthru-only-matching"]).unwrap();
+    assert_eq!(ctx, args.context);
+
+    let args = parse_low_raw(["--passthrough", "--passthrough-only-matching"])
+        .unwrap();
+    assert_eq!(ctx, args.context);
 }
 
 /// -P/--pcre2

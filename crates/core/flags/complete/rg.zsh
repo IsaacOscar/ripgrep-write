@@ -226,6 +226,8 @@ _rg() {
     + '(passthru)' # Pass-through options
     '(--vimgrep)--passthru[show both matching and non-matching lines]'
     '(--vimgrep)--passthrough[alias for --passthru]'
+    '(--vimgrep)--passthru-only-matching[show both matching and non-matching lines of files that match]'
+    '(--vimgrep)--passthrough-only-matching[alias for --passthru-only-matching]'
 
     + '(pcre2)' # PCRE2 options
     {-P,--pcre2}'[enable matching with PCRE2]'
