@@ -3,6 +3,7 @@ use std::{
     ffi::OsStr,
     fs::{self, FileType, Metadata},
     io,
+    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
     sync::Arc,
@@ -1497,12 +1498,23 @@ impl<'s> Worker<'s> {
     /// skipped by the ignore matcher.
     fn run(mut self) {
         while let Some(work) = self.get_work() {
-            if let WalkState::Quit = self.run_one(work) {
+            // Catch any panics that occur
+            // AssertUnwindSafe tells rust to trust us that the captured
+            // variables (self, and work) will be in an acceptable state if a panic occurs.
+            // Which may be the case, depending on where the panic occured, but it beets hanging indefinitely.
+            let result =
+                panic::catch_unwind(AssertUnwindSafe(|| self.run_one(work)));
+            if let Ok(WalkState::Quit) = result {
                 self.quit_now();
-            }
+            } else if let Err(panic) = result {
+                // A panic occurred, instruct the other workers to quite
+                // (Otherwise they will hang indefinitely waiting for more work that never comes)
+                self.send_quit();
+                // Now rethrow the panic
+                std::panic::resume_unwind(panic)
+            };
         }
     }
-
     fn run_one(&mut self, mut work: Work) -> WalkState {
         // If the work is not a directory, then we can just execute the
         // caller's callback immediately and move on.
