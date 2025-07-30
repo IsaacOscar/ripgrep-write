@@ -168,10 +168,7 @@ impl SummaryBuilder {
     pub fn build<W: WriteColor>(&self, wtr: W) -> Summary<W> {
         Summary {
             config: self.config.clone(),
-            wtr: RefCell::new(MultiWriter::new(
-                wtr,
-                self.config.ensure_no_binary,
-            )),
+            wtr: RefCell::new(MultiWriter::new(wtr)),
         }
     }
 
@@ -720,17 +717,17 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
         Ok(true)
     }
 
-    fn begin(&mut self, _searcher: &Searcher) -> Result<bool, io::Error> {
+    fn begin(&mut self, searcher: &Searcher) -> Result<bool, io::Error> {
         if self.path.is_none() && self.summary.config.kind.requires_path() {
             return Err(io::Error::error_message(format!(
                 "output kind {:?} requires a file path",
                 self.summary.config.kind,
             )));
         }
-        self.summary
-            .wtr
-            .borrow_mut()
-            .begin(self.path.as_ref().map(|p| p.as_path()))?;
+        self.summary.wtr.borrow_mut().begin(
+            searcher.binary_detection().is_strict(),
+            self.path.as_ref().map(|p| p.as_path()),
+        )?;
         self.start_time = Instant::now();
         self.match_count = 0;
         self.binary_byte_offset = None;

@@ -955,11 +955,11 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         Ok(true)
     }
 
-    fn begin(&mut self, _searcher: &Searcher) -> Result<bool, io::Error> {
-        self.standard
-            .wtr
-            .borrow_mut()
-            .begin(self.path.as_ref().map(|p| p.as_path()))?;
+    fn begin(&mut self, searcher: &Searcher) -> Result<bool, io::Error> {
+        self.standard.wtr.borrow_mut().begin(
+            searcher.binary_detection().is_strict(),
+            self.path.as_ref().map(|p| p.as_path()),
+        )?;
         self.start_time = Instant::now();
         self.match_count = 0;
         self.after_context_remaining = 0;

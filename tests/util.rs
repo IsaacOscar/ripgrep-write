@@ -1,9 +1,8 @@
-#![allow(dead_code)]
 use std::env;
 use std::error;
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -202,20 +201,6 @@ impl Dir {
     pub fn remove<P: AsRef<Path>>(&self, name: P) {
         let path = self.dir.join(name);
         nice_err(&path, fs::remove_file(&path));
-    }
-
-    /// Remove a file or directory with the given name from this directory.
-    pub fn remove_maybe_dir<P: AsRef<Path>>(&self, name: P) {
-        let path = self.dir.join(name);
-        // Sadly fs::remove_file only works on files, and fs::remove_dir_all only works on directories
-        // So just try both (remove_dir_all must come first on Windows, as remove_fiel gives an access denied)
-        let res = match fs::remove_dir_all(&path) {
-            Err(e) if e.kind() == ErrorKind::NotADirectory => {
-                fs::remove_file(&path)
-            }
-            res => res,
-        };
-        nice_err(&path, res);
     }
 
     /// Create a new directory with the given path (and any directories above

@@ -1,23 +1,19 @@
-#![allow(unused)]
-// TODO: remove 'allows'
 use crate::hay::*;
-use crate::util::{cmd_exists, nice_err, Dir, TestCommand};
+use crate::util::{cmd_exists, Dir, TestCommand};
+#[cfg(unix)] use crate::util::nice_err;
 use encoding_rs::mem as encoding;
 use regex::Regex;
-use std::{
-    borrow::Cow,
-    fs::{self, File},
-    io::Result,
-    path::Path,
-    thread,
-    time::{Duration, SystemTime},
-};
+use std::{thread, time::{Duration, SystemTime}};
+#[cfg(unix)] use std::fs::{self, File};
 
 fn locksher(str: &str) -> String {
     str.replace("Sherlock", "Locksher")
 }
 
-/// A test that the main -W / --write-replace flag works with a simple replacement, and with files with some unusual bytes
+// Note: most of the --write-replace tests use --mmap, this is to ensure that memory mapps are properly closed before writing
+// to files (which is necessary on Windows, but not Linux)
+
+// A test that the main -W / --write-replace flag works with a simple replacement, and with files with some unusual bytes
 rgtest!(write_replace_strange, |dir: Dir, _| {
     // Test twice, once when we disable the new flags that fix issues
     for disable_fixes in [false, true] {
@@ -91,7 +87,7 @@ rgtest!(write_replace_strange, |dir: Dir, _| {
             dir.read("sherlock.no-eol")
         );
 
-        // SHERLOCK_NUL needs --ensure-no-binary to be skipped (or --text to process it fully)
+        // SHERLOCK_NUL needs --strict-no-binary to be skipped (or --text to process it fully)
         eqnice_repr!(
             if disable_fixes {
                 // The first 65472 bytes are replaced, and then a warning message truncating the rest of the file
@@ -105,8 +101,8 @@ rgtest!(write_replace_strange, |dir: Dir, _| {
     }
 });
 
-/// A test that --write-replace preserves permissions
-/// (Rusts's standard library doesn't expose a way to change file attirbutes on Windows)
+// A test that --write-replace preserves permissions
+// (Rusts's standard library doesn't expose a way to change file attirbutes on Windows)
 #[cfg(unix)]
 rgtest!(write_replace_permissions, |dir: Dir, mut cmd: TestCommand| {
     dir.create("sherlock", SHERLOCK);
@@ -194,8 +190,8 @@ rgtest!(
     }
 );
 
-/// A test to show that --write-replace and --write-to will write
-/// to the target of symbolic links, and not touch the links themselves
+// A test to show that --write-replace and --write-to will write
+// to the target of symbolic links, and not touch the links themselves
 rgtest!(write_symlinks, |dir: Dir, _| {
     let sherlock2 = SHERLOCK.to_string().to_uppercase();
     for write_args in [["--mmap", "-W"], ["-Oout", "-R"]] {
@@ -255,9 +251,8 @@ rgtest!(write_symlinks, |dir: Dir, _| {
     }
 });
 
-/// A test that --write-to refuses to write to it's input files
+// A test that --write-to refuses to write to it's input files
 rgtest!(write_to_no_overwrite, |dir: Dir, _| {
-    use std::ffi::OsStr;
     // Tests rg -L "Sherlock" <input_file> -O <output_folder>, after executing prepare.
     // Prepare should return the working directory to use (relative to dir)
     // <input_realpath> should be the realpath of the input file relative to dir.
@@ -273,10 +268,10 @@ rgtest!(write_to_no_overwrite, |dir: Dir, _| {
         let mut cmd = dir.clean_command();
         let cwd = dir.path_of(prepare());
         let files = dir.list();
-        // Make some of the tests use --ensure-no-binary, and others not use it
+        // Make some of the tests use --strict-no-binary, and others not use it
         // (this is to test different code paths in multi_writer.rs);
         let binary = if output_folder.starts_with(".") {
-            "--ensure-no-binary"
+            "--strict-no-binary"
         } else {
             "--text"
         };
@@ -298,7 +293,7 @@ rgtest!(write_to_no_overwrite, |dir: Dir, _| {
             eqnice_repr!(files, dir.list()); // No files should be created or deleted
             cmd = dir.command(); // Reset command (but not dir) for next iteration
         }
-    };
+    }
     // Using . as the output directory
     test(&dir, "file", ".", "file", || {
         dir.create("file", SHERLOCK);
@@ -357,7 +352,7 @@ rgtest!(write_to_no_overwrite, |dir: Dir, _| {
     });
 });
 
-/// A test that the main --write-replace flag touches file time stamps in a reasonable way
+// A test that the main --write-replace flag touches file time stamps in a reasonable way
 rgtest!(write_replace_timestamps, |dir: Dir, _| {
     // Do the test twice, as the behaviour is different with --passthru vs --passthru-only-matching
     for only_matching in [true, false] {
@@ -562,8 +557,8 @@ rgtest!(write_to_absolute, |dir: Dir, mut cmd: TestCommand| {
     eqnice!(SHERLOCK, dir.read("in/sherlock"));
 });
 
-/// A test that --write-replace and --write-to don't output in color when in --color=auto mode,
-/// even if stdout is a terminal (I don't have the faintest idea how to test this on Windows)
+// A test that --write-replace and --write-to don't output in color when in --color=auto mode,
+// even if stdout is a terminal (I don't have the faintest idea how to test this on Windows)
 #[cfg(unix)]
 rgtest!(write_no_color, |dir: Dir, _| {
     use std::ffi::CStr;
@@ -702,7 +697,7 @@ rgtest!(write_bad_flags, |dir: Dir, _| {
                 )
             };
             // due to the -o flag, there's no newline at the end of lines with matched
-            let mut expected = String::new()
+            let expected = String::new()
                 + &make_line(1, 57, Some(56), &matched)
                 + &make_line(2, 65, None, "[Omitted long context line]\n")
                 + &make_line(3, 49, Some(177), &matched)
@@ -776,40 +771,46 @@ rgtest!(write_quiet, |dir: Dir, _| {
     }
 });
 
-// A test of a former bug with --mmap and --ensure-no-binary
-rgtest!(write_mmap_ensure_no_binary, |dir: Dir, mut cmd: TestCommand| {
-    dir.create("sherlock", SHERLOCK);
-    dir.create("sherlock.bin", SHERLOCK_NUL);
-    cmd.args(["--mmap", "--ensure-no-binary", "Sherlock"]);
-    let expected = "\
-        sherlock:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
-        sherlock:be, to a very large extent, the result of luck. Sherlock Holmes\n";
-    eqnice!(expected, cmd.stdout());
+// A test of a former bug with --mmap and --strict-no-binary (but NOT with --passthru, which is implied by --write-replace)
+rgtest!(write_mmap_strict_no_binary, |dir: Dir, _| {
+    for binary_arg in ["--strict-no-binary", "--no-binary"] {
+        for out_args in [vec![], vec!["-O", "out"]] {
+            let mut cmd = dir.clean_command();
+            dir.create("sherlock", SHERLOCK);
+            dir.create("sherlock.bin", SHERLOCK_NUL);
+            cmd.args(["--mmap", "--with-filename", binary_arg, "Sherlock"])
+                .args(&out_args);
 
-    // And with -O
-    cmd.args(["-O", "out"]);
-    eqnice!("", cmd.stdout());
-    eqnice_list!(
-        "out", "out/sherlock", "sherlock", "sherlock.bin"
-        => dir.list()
-    );
-    let expected = expected.replace("sherlock:", "");
-    eqnice!(expected, dir.read("out/sherlock"));
-    dir.remove("out");
+            let expected_sherlock = "\
+            sherlock:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+            sherlock:be, to a very large extent, the result of luck. Sherlock Holmes\n".to_string();
 
-    // Again, but with --no-binary to restore default behaviour
-    cmd.args(["--no-binary"]);
-    eqnice!("", cmd.stdout());
-    eqnice_list!(
-        "out",
-        "out/sherlock",
-        "out/sherlock.bin",
-        "sherlock",
-        "sherlock.bin"
-        => dir.list()
-    );
-    eqnice!(expected, dir.read("out/sherlock"));
-    let expected = "don't know Sherlock Holmes yet,\" he said; \"perhaps you would not care\n".repeat(7)
-        + "WARNING: stopped searching binary file after match (found \"\\0\" byte around offset 77041)\n";
-    eqnice!(expected, dir.read("out/sherlock.bin"));
+            let expected_bin = if binary_arg != "--strict-no-binary" {
+                "sherlock.bin:don't know Sherlock Holmes yet,\" he said; \"perhaps you would not care\n".repeat(8) + "\
+                sherlock.bin:\"Dr. Watson, Mr. Sherlock Holmes,\" said Stamford, introducing us.\n\
+                sherlock.bin:and why? Because there was no reliable test. Now we have the Sherlock\n\
+                sherlock.bin:\"Very interesting reading it might be made, too,\" remarked Sherlock\n\
+                sherlock.bin:Sherlock Holmes seemed delighted at the idea of sharing his rooms with\n\
+                sherlock.bin:following morning Sherlock Holmes followed me with several boxes and\n"
+            } else {
+                "".to_string()
+            };
+            if out_args.is_empty() {
+                eqnice!(
+                    expected_sherlock + expected_bin.as_str(),
+                    cmd.stdout()
+                );
+                eqnice_list!("sherlock", "sherlock.bin" => dir.list());
+            } else {
+                eqnice!("", cmd.stdout());
+                eqnice!(expected_sherlock, dir.read("out/sherlock"));
+                if expected_bin.is_empty() {
+                    eqnice_list!("out", "out/sherlock", "sherlock", "sherlock.bin" => dir.list());
+                } else {
+                    eqnice!(expected_bin, dir.read("out/sherlock.bin"));
+                    eqnice_list!("out", "out/sherlock", "out/sherlock.bin", "sherlock", "sherlock.bin" => dir.list());
+                }
+            }
+        }
+    }
 });

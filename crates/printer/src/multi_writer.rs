@@ -11,7 +11,6 @@ use termcolor::{Ansi, Buffer, NoColor, WriteColor};
 pub(crate) struct MultiWriter<W: WriteColor> {
     stdout: CounterWriter<W>,
     current: WriteTo,
-    cancellable: bool,
     output_directory: Option<PathBuf>, // If we are outputting to a file somewhere
     buffer_files: bool,
     input_path: Option<PathBuf>, // Path of the current file we are searching (if any)
@@ -404,14 +403,7 @@ impl<W: WriteColor> MultiWriter<W> {
         match self.current {
             WriteTo::Stdout => panic!("Too late to cancel, MultiWriter has already been writing to stdout"),
             WriteTo::Nowhere => {}, // Already cancelled
-            WriteTo::Buffer(_) => if self.cancellable {
-                // Discard the buffer, and any future writes
-                self.current = WriteTo::Nowhere
-            } else {
-                // This is likely an error, even though I could cancel
-                // the same as above
-                panic!("MultiWriter was not created as cancellable")
-            },
+            WriteTo::Buffer(_) => self.current = WriteTo::Nowhere, // Discard the buffer, and any future writes
             WriteTo::File(_) => panic!("Too late to cancel, MultiWriter has been writing to a file"),
             WriteTo::Uninitialized => panic!("MultiWriter::begin has not been called yet"),
         }
@@ -439,7 +431,11 @@ impl<W: WriteColor> MultiWriter<W> {
         self.output_directory().is_some_and(|path| path.as_os_str().is_empty())
     }
 
-    pub(crate) fn begin(&mut self, path: Option<&Path>) -> Result<()> {
+    pub(crate) fn begin(
+        &mut self,
+        cancellable: bool,
+        path: Option<&Path>,
+    ) -> Result<()> {
         if !matches!(self.current, WriteTo::Uninitialized) {
             panic!("MultiWriter::finish hasn't been called!")
         }
@@ -474,7 +470,7 @@ impl<W: WriteColor> MultiWriter<W> {
 
         // We need to buffer if we might cancel before outputing anything
         // or we are going to write to the file we are currently reading to
-        if self.cancellable || self.is_write_replace() {
+        if cancellable || self.is_write_replace() {
             trace_with_path!(self, "creating in-memory buffer");
             // Make sure we provide the correct color support
             let buffer = if self.supports_color() {
@@ -563,14 +559,12 @@ impl<W: WriteColor> MultiWriter<W> {
 
     pub(crate) fn new_with_file_output(
         wtr: W,
-        cancellable: bool,
         output_directory: Option<PathBuf>,
         buffer_files: bool,
     ) -> MultiWriter<W> {
         MultiWriter {
             stdout: CounterWriter::new(wtr),
             current: WriteTo::Uninitialized,
-            cancellable,
             output_directory,
             buffer_files,
             input_path: None,
@@ -578,8 +572,8 @@ impl<W: WriteColor> MultiWriter<W> {
         }
     }
 
-    pub(crate) fn new(wtr: W, cancellable: bool) -> MultiWriter<W> {
-        MultiWriter::new_with_file_output(wtr, cancellable, None, false)
+    pub(crate) fn new(wtr: W) -> MultiWriter<W> {
+        MultiWriter::new_with_file_output(wtr, None, false)
     }
 }
 
