@@ -181,8 +181,6 @@ pub struct Config {
     /// Whether to stop searching when a non-matching line is found after a
     /// matching line.
     stop_on_nonmatch: bool,
-    /// Is this searcher being use in -W/--write-replace mode?
-    write_replace: bool,
 }
 
 impl Default for Config {
@@ -201,7 +199,6 @@ impl Default for Config {
             encoding: None,
             bom_sniffing: true,
             stop_on_nonmatch: false,
-            write_replace: false,
         }
     }
 }
@@ -260,11 +257,6 @@ pub enum ConfigError {
         /// The provided encoding label that could not be found.
         label: Vec<u8>,
     },
-    /// Occurs when an encoding other than UTF-8 is encountered in -W/--write-replace mode
-    WriteReplaceEncoding {
-        /// The name of the encoding that is not supported.
-        name: &'static str,
-    },
 }
 
 impl std::error::Error for ConfigError {}
@@ -287,11 +279,6 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "grep config error: unknown encoding: {}",
                 String::from_utf8_lossy(label),
-            ),
-            ConfigError::WriteReplaceEncoding { ref name } => write!(
-                f,
-                "grep config error: non-UTF-8 encoding is not supported with -W/--write-replace: {}",
-                name,
             ),
         }
     }
@@ -578,16 +565,6 @@ impl SearcherBuilder {
         self.config.stop_on_nonmatch = stop_on_nonmatch;
         self
     }
-
-    /// Whether we are using the searcher with write_replace or not
-    /// (currently only used for error messages for non-UTF-8 encodings)
-    pub fn write_replace(
-        &mut self,
-        write_replace: bool,
-    ) -> &mut SearcherBuilder {
-        self.config.write_replace = write_replace;
-        self
-    }
 }
 
 /// A searcher executes searches over a haystack and writes results to a caller
@@ -803,7 +780,7 @@ impl Searcher {
         self.check_config(&matcher).map_err(S::Error::error_config)?;
 
         // We can search the slice directly, unless we need to do transcoding.
-        if self.slice_needs_transcoding::<S>(slice.as_ref())? {
+        if self.slice_needs_transcoding(slice.as_ref()) {
             log::trace!(
                 "slice reader: needs transcoding, using generic reader"
             );
@@ -845,24 +822,9 @@ impl Searcher {
     }
 
     /// Returns true if and only if the given slice needs to be transcoded.
-    /// Will return an error if the encoding is not supported
-    fn slice_needs_transcoding<S: Sink>(
-        &self,
-        slice: &[u8],
-    ) -> Result<bool, S::Error> {
-        match self.config.encoding {
-            Some(ref enc)
-                if self.config.write_replace
-                    && enc.0 != encoding_rs::UTF_8 =>
-            {
-                Err(S::Error::error_config(
-                    ConfigError::WriteReplaceEncoding { name: enc.0.name() },
-                ))
-            }
-            Some(_) => Ok(true),
-            None => Ok(self.config.bom_sniffing
-                && slice_has_bom::<S>(slice, self.config.write_replace)?),
-        }
+    fn slice_needs_transcoding(&self, slice: &[u8]) -> bool {
+        self.config.encoding.is_some()
+            || (self.config.bom_sniffing && slice_has_bom(slice))
     }
 }
 
@@ -1058,24 +1020,14 @@ impl Searcher {
 ///
 /// This is used by the searcher to determine if a transcoder is necessary.
 /// Otherwise, it is advantageous to search the slice directly.
-/// Will report an error if the encoding is not supported in WriteReplace made
-fn slice_has_bom<S: Sink>(
-    slice: &[u8],
-    write_replace: bool,
-) -> Result<bool, S::Error> {
+fn slice_has_bom(slice: &[u8]) -> bool {
     let enc = match encoding_rs::Encoding::for_bom(slice) {
-        None => return Ok(false),
+        None => return false,
         Some((enc, _)) => enc,
     };
     log::trace!("found byte-order mark (BOM) for encoding {enc:?}");
-    if write_replace && enc != encoding_rs::UTF_8 {
-        Err(S::Error::error_config(ConfigError::WriteReplaceEncoding {
-            name: enc.name(),
-        }))
-    } else {
-        Ok([encoding_rs::UTF_16LE, encoding_rs::UTF_16BE, encoding_rs::UTF_8]
-            .contains(&enc))
-    }
+    [encoding_rs::UTF_16LE, encoding_rs::UTF_16BE, encoding_rs::UTF_8]
+        .contains(&enc)
 }
 
 #[cfg(test)]

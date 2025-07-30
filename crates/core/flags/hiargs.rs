@@ -784,9 +784,6 @@ impl HiArgs {
                 builder.bom_sniffing(false);
             }
         }
-        builder.write_replace(
-            self.write_to.as_ref().is_some_and(|p| p.as_os_str().is_empty()),
-        );
         Ok(builder.build())
     }
 
