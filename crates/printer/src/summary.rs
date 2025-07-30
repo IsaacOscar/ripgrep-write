@@ -13,9 +13,9 @@ use {
 };
 
 use crate::{
-    cancellable_writer::CancellableWriter,
     color::ColorSpecs,
     hyperlink::{self, HyperlinkConfig},
+    multi_writer::MultiWriter,
     stats::Stats,
     util::{find_iter_at_in_context, PrinterPath},
 };
@@ -170,7 +170,7 @@ impl SummaryBuilder {
     pub fn build<W: WriteColor>(&self, wtr: W) -> Summary<W> {
         Summary {
             config: self.config.clone(),
-            wtr: RefCell::new(CancellableWriter::new(
+            wtr: RefCell::new(MultiWriter::new(
                 wtr,
                 self.config.ensure_no_binary,
             )),
@@ -364,7 +364,7 @@ impl SummaryBuilder {
 #[derive(Clone, Debug)]
 pub struct Summary<W: WriteColor> {
     config: Config,
-    wtr: RefCell<CancellableWriter<W>>,
+    wtr: RefCell<MultiWriter<W>>,
 }
 
 impl<W: WriteColor> Summary<W> {
@@ -472,7 +472,7 @@ impl<W: WriteColor> Summary<W> {
     /// Returns true if and only if this printer has written at least one byte
     /// to the underlying writer during any of the previous searches.
     pub fn has_written(&self) -> bool {
-        self.wtr.borrow().has_written()
+        self.wtr.borrow().total_count() > 0
     }
 
     /// Return a mutable reference to the underlying writer.
@@ -735,7 +735,10 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
                 self.summary.config.kind,
             )));
         }
-        self.summary.wtr.borrow_mut().reset_state();
+        self.summary
+            .wtr
+            .borrow_mut()
+            .begin(self.path.as_ref().map(|p| p.as_path()))?;
         self.start_time = Instant::now();
         self.match_count = 0;
         self.binary_byte_offset = None;
@@ -759,7 +762,6 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
         {
             self.summary.wtr.borrow_mut().cancel();
         }
-        self.summary.wtr.borrow_mut().commit()?;
 
         if let Some(ref mut stats) = self.stats {
             stats.add_elapsed(self.start_time.elapsed());
@@ -793,8 +795,9 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
             && searcher.binary_detection().quit_byte().is_some()
         {
             self.match_count = 0;
-            return Ok(());
-        } else if let Some(ref mut stats) = self.stats {
+            return self.summary.wtr.borrow_mut().finish();
+        }
+        if let Some(ref mut stats) = self.stats {
             stats.add_matches(self.stats_match_count);
             stats.add_matched_lines(self.stats_matched_line_count);
         }
@@ -832,7 +835,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
             }
             SummaryKind::Quiet => {}
         }
-        Ok(())
+        self.summary.wtr.borrow_mut().finish()
     }
 }
 

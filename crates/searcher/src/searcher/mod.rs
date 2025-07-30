@@ -21,6 +21,7 @@ use crate::{
 };
 
 pub use self::mmap::MmapChoice;
+use self::mmap::MmapReader;
 
 mod core;
 mod glue;
@@ -180,6 +181,8 @@ pub struct Config {
     /// Whether to stop searching when a non-matching line is found after a
     /// matching line.
     stop_on_nonmatch: bool,
+    /// Is this searcher being use in -W/--write-replace mode?
+    write_replace: bool,
 }
 
 impl Default for Config {
@@ -198,6 +201,7 @@ impl Default for Config {
             encoding: None,
             bom_sniffing: true,
             stop_on_nonmatch: false,
+            write_replace: false,
         }
     }
 }
@@ -256,6 +260,11 @@ pub enum ConfigError {
         /// The provided encoding label that could not be found.
         label: Vec<u8>,
     },
+    /// Occurs when an encoding other than UTF-8 is encountered in -W/--write-replace mode
+    WriteReplaceEncoding {
+        /// The name of the encoding that is not supported.
+        name: &'static str,
+    },
 }
 
 impl std::error::Error for ConfigError {}
@@ -278,6 +287,11 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "grep config error: unknown encoding: {}",
                 String::from_utf8_lossy(label),
+            ),
+            ConfigError::WriteReplaceEncoding { ref name } => write!(
+                f,
+                "grep config error: non-UTF-8 encoding is not supported with -W/--write-replace: {}",
+                name,
             ),
         }
     }
@@ -564,6 +578,16 @@ impl SearcherBuilder {
         self.config.stop_on_nonmatch = stop_on_nonmatch;
         self
     }
+
+    /// Whether we are using the searcher with write_replace or not
+    /// (currently only used for error messages for non-UTF-8 encodings)
+    pub fn write_replace(
+        &mut self,
+        write_replace: bool,
+    ) -> &mut SearcherBuilder {
+        self.config.write_replace = write_replace;
+        self
+    }
 }
 
 /// A searcher executes searches over a haystack and writes results to a caller
@@ -632,8 +656,9 @@ impl Searcher {
         S: Sink,
     {
         let path = path.as_ref();
+        log::trace!("{}: opening file for reading", path.display());
         let file = File::open(path).map_err(S::Error::error_io)?;
-        self.search_file_maybe_path(matcher, Some(path), &file, write_to)
+        self.search_file_maybe_path(matcher, Some(path), file, write_to)
     }
 
     /// Execute a search over a file and write the results to the given sink.
@@ -645,7 +670,7 @@ impl Searcher {
     pub fn search_file<M, S>(
         &mut self,
         matcher: M,
-        file: &File,
+        file: File,
         write_to: S,
     ) -> Result<(), S::Error>
     where
@@ -659,16 +684,24 @@ impl Searcher {
         &mut self,
         matcher: M,
         path: Option<&Path>,
-        file: &File,
+        file: File,
         write_to: S,
     ) -> Result<(), S::Error>
     where
         M: Matcher,
         S: Sink,
     {
-        if let Some(mmap) = self.config.mmap.open(file, path) {
+        if let Some(mmap) = self.config.mmap.open(&file, path) {
             log::trace!("{:?}: searching via memory map", path);
-            return self.search_slice(matcher, &mmap, write_to);
+            // The MmapReader is needed on windows to ensure that the file is unmapped
+            // When the reader is droped, which needs to happen before the file is open again for writing
+            // I haven't encountered any errors when not dropping the file
+            // but I've included it just to be safe
+            return self.search_slice(
+                matcher,
+                MmapReader::new(mmap, file),
+                write_to,
+            );
         }
         // Fast path for multi-line searches of files when memory maps are not
         // enabled. This pre-allocates a buffer roughly the size of the file,
@@ -678,15 +711,25 @@ impl Searcher {
                 "{:?}: reading entire file on to heap for mulitline",
                 path
             );
-            self.fill_multi_line_buffer_from_file::<S>(file)?;
+            self.fill_multi_line_buffer_from_file::<S>(&file)?;
             log::trace!("{:?}: searching via multiline strategy", path);
-            MultiLine::new(
-                self,
-                matcher,
-                &*self.multi_line_buffer.borrow(),
-                write_to,
-            )
-            .run()
+
+            // This little struct is just to ensure that the file is dropped when the slice reference is
+            // (Not dropping the File doesn't cause problems, but just in case we are writing to the same file
+            // and the OS doesn't like us writing to a file we have open for reading)
+            struct SliceFile<'a> {
+                slice: &'a [u8],
+                #[allow(dead_code)]
+                file: File,
+            }
+            impl<'a> AsRef<[u8]> for SliceFile<'a> {
+                fn as_ref(&self) -> &[u8] {
+                    self.slice
+                }
+            }
+            let slice_file =
+                SliceFile { slice: &self.multi_line_buffer.borrow(), file };
+            MultiLine::new(self, matcher, slice_file, write_to).run()
         } else {
             log::trace!("{:?}: searching using generic reader", path);
             self.search_reader(matcher, file, write_to)
@@ -746,20 +789,21 @@ impl Searcher {
 
     /// Execute a search over the given slice and write the results to the
     /// given sink.
-    pub fn search_slice<M, S>(
+    pub fn search_slice<M, T, S>(
         &mut self,
         matcher: M,
-        slice: &[u8],
+        slice: T,
         write_to: S,
     ) -> Result<(), S::Error>
     where
         M: Matcher,
         S: Sink,
+        T: std::io::Read + AsRef<[u8]>,
     {
         self.check_config(&matcher).map_err(S::Error::error_config)?;
 
         // We can search the slice directly, unless we need to do transcoding.
-        if self.slice_needs_transcoding(slice) {
+        if self.slice_needs_transcoding::<S>(slice.as_ref())? {
             log::trace!(
                 "slice reader: needs transcoding, using generic reader"
             );
@@ -801,9 +845,24 @@ impl Searcher {
     }
 
     /// Returns true if and only if the given slice needs to be transcoded.
-    fn slice_needs_transcoding(&self, slice: &[u8]) -> bool {
-        self.config.encoding.is_some()
-            || (self.config.bom_sniffing && slice_has_bom(slice))
+    /// Will return an error if the encoding is not supported
+    fn slice_needs_transcoding<S: Sink>(
+        &self,
+        slice: &[u8],
+    ) -> Result<bool, S::Error> {
+        match self.config.encoding {
+            Some(ref enc)
+                if self.config.write_replace
+                    && enc.0 != encoding_rs::UTF_8 =>
+            {
+                Err(S::Error::error_config(
+                    ConfigError::WriteReplaceEncoding { name: enc.0.name() },
+                ))
+            }
+            Some(_) => Ok(true),
+            None => Ok(self.config.bom_sniffing
+                && slice_has_bom::<S>(slice, self.config.write_replace)?),
+        }
     }
 }
 
@@ -999,14 +1058,24 @@ impl Searcher {
 ///
 /// This is used by the searcher to determine if a transcoder is necessary.
 /// Otherwise, it is advantageous to search the slice directly.
-fn slice_has_bom(slice: &[u8]) -> bool {
+/// Will report an error if the encoding is not supported in WriteReplace made
+fn slice_has_bom<S: Sink>(
+    slice: &[u8],
+    write_replace: bool,
+) -> Result<bool, S::Error> {
     let enc = match encoding_rs::Encoding::for_bom(slice) {
-        None => return false,
+        None => return Ok(false),
         Some((enc, _)) => enc,
     };
     log::trace!("found byte-order mark (BOM) for encoding {enc:?}");
-    [encoding_rs::UTF_16LE, encoding_rs::UTF_16BE, encoding_rs::UTF_8]
-        .contains(&enc)
+    if write_replace && enc != encoding_rs::UTF_8 {
+        Err(S::Error::error_config(ConfigError::WriteReplaceEncoding {
+            name: enc.name(),
+        }))
+    } else {
+        Ok([encoding_rs::UTF_16LE, encoding_rs::UTF_16BE, encoding_rs::UTF_8]
+            .contains(&enc))
+    }
 }
 
 #[cfg(test)]
@@ -1020,7 +1089,7 @@ mod tests {
         let matcher = RegexMatcher::new("");
         let sink = KitchenSink::new();
         let mut searcher = SearcherBuilder::new().heap_limit(Some(0)).build();
-        let res = searcher.search_slice(matcher, &[], sink);
+        let res = searcher.search_slice(matcher, &[][..], sink);
         assert!(res.is_err());
     }
 
@@ -1031,7 +1100,7 @@ mod tests {
 
         let sink = KitchenSink::new();
         let mut searcher = Searcher::new();
-        let res = searcher.search_slice(matcher, &[], sink);
+        let res = searcher.search_slice(matcher, &[][..], sink);
         assert!(res.is_err());
     }
 

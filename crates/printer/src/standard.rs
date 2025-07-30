@@ -2,7 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     cmp,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
@@ -18,9 +18,9 @@ use {
 };
 
 use crate::{
-    cancellable_writer::CancellableWriter,
     color::ColorSpecs,
     hyperlink::{self, HyperlinkConfig},
+    multi_writer::MultiWriter,
     stats::Stats,
     util::{
         find_iter_at_in_context, trim_ascii_prefix, trim_line_terminator,
@@ -58,9 +58,11 @@ struct Config {
     path_terminator: Option<u8>,
     ensure_eol: bool,
     ensure_no_binary: bool,
+    output_directory: Option<PathBuf>,
+    buffer_files: bool,
 }
 
-impl Default for Config {
+impl<'a> Default for Config {
     fn default() -> Config {
         Config {
             colors: ColorSpecs::default(),
@@ -86,6 +88,8 @@ impl Default for Config {
             path_terminator: None,
             ensure_eol: true,
             ensure_no_binary: false,
+            output_directory: None,
+            buffer_files: true,
         }
     }
 }
@@ -134,9 +138,11 @@ impl StandardBuilder {
     pub fn build<W: WriteColor>(&self, wtr: W) -> Standard<W> {
         Standard {
             config: self.config.clone(),
-            wtr: RefCell::new(CancellableWriter::new(
+            wtr: RefCell::new(MultiWriter::new_with_file_output(
                 wtr,
                 self.config.ensure_no_binary,
+                self.config.output_directory.clone(), // It's easier to clone than deal with lifetimes
+                self.config.buffer_files,
             )),
             matches: vec![],
         }
@@ -494,6 +500,20 @@ impl StandardBuilder {
         self.config.ensure_no_binary = ensure;
         self
     }
+
+    /// Which directory to store any per-file output to (if any)
+    /// And whether to use a buffer when writing files to it
+    pub fn output_directory(
+        &mut self,
+        directory: Option<&Path>,
+        buffer: bool,
+    ) -> &mut StandardBuilder {
+        // Trying to store the &Path inside self.config makes life too hard
+        // due to all the necessary lifetime paramaters, so I just make a copy
+        self.config.output_directory = directory.map(|p| p.to_path_buf());
+        self.config.buffer_files = buffer;
+        self
+    }
 }
 
 /// The standard printer, which implements grep-like formatting, including
@@ -512,7 +532,7 @@ impl StandardBuilder {
 #[derive(Clone, Debug)]
 pub struct Standard<W: WriteColor> {
     config: Config,
-    wtr: RefCell<CancellableWriter<W>>,
+    wtr: RefCell<MultiWriter<W>>,
     matches: Vec<Match>,
 }
 
@@ -583,9 +603,6 @@ impl<W: WriteColor> Standard<W> {
         M: Matcher,
         P: ?Sized + AsRef<Path>,
     {
-        if !self.config.path {
-            return self.sink(matcher);
-        }
         let interpolator =
             hyperlink::Interpolator::new(&self.config.hyperlink);
         let stats = if self.config.stats { Some(Stats::new()) } else { None };
@@ -635,9 +652,10 @@ impl<W: WriteColor> Standard<W> {
 
 impl<W: WriteColor> Standard<W> {
     /// Returns true if and only if this printer has written at least one byte
-    /// to the underlying writer during any of the previous searches.
+    /// to the underlying writer during any of the previous searches,
+    /// or to an internal buffer in the current search.
     pub fn has_written(&self) -> bool {
-        self.wtr.borrow().has_written()
+        self.wtr.borrow().total_count() > 0
     }
 
     /// Return a mutable reference to the underlying writer.
@@ -947,7 +965,10 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
     }
 
     fn begin(&mut self, _searcher: &Searcher) -> Result<bool, io::Error> {
-        self.standard.wtr.borrow_mut().reset_state();
+        self.standard
+            .wtr
+            .borrow_mut()
+            .begin(self.path.as_ref().map(|p| p.as_path()))?;
         self.start_time = Instant::now();
         self.match_count = 0;
         self.after_context_remaining = 0;
@@ -968,7 +989,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         if let Some(offset) = self.binary_byte_offset {
             StandardImpl::new(searcher, self).write_binary_message(offset)?;
         }
-        self.standard.wtr.borrow_mut().commit()?;
+        self.standard.wtr.borrow_mut().finish()?;
         if let Some(stats) = self.stats.as_mut() {
             stats.add_matches(self.stats_match_count);
             stats.add_matched_lines(self.stats_matched_line_count);
@@ -1497,7 +1518,8 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
             return Ok(());
         }
         if let Some(ref sep) = *self.config().separator_search {
-            if self.wtr().borrow().has_written() {
+            let ever_written = self.wtr().borrow().total_count() > 0;
+            if ever_written {
                 self.write(sep)?;
                 self.write_line_term()?;
             }
@@ -1635,13 +1657,17 @@ impl<'a, M: Matcher, W: WriteColor> StandardImpl<'a, M, W> {
     }
 
     /// Return the underlying writer that we are printing to.
-    fn wtr(&self) -> &'a RefCell<CancellableWriter<W>> {
+    fn wtr(&self) -> &'a RefCell<MultiWriter<W>> {
         &self.sink.standard.wtr
     }
 
-    /// Return the path associated with this printer, if one exists.
+    /// Return the path associated with this printer, if one exists and we need to print it.
     fn path(&self) -> Option<&'a PrinterPath<'a>> {
-        self.sink.path.as_ref()
+        if self.config().path {
+            self.sink.path.as_ref()
+        } else {
+            None
+        }
     }
 
     /// Return the appropriate field separator based on whether we are emitting

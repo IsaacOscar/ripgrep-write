@@ -31,6 +31,12 @@ impl<W> CounterWriter<W> {
         self.total_count + self.count
     }
 
+    /// Adds the given number to the count
+    #[inline]
+    pub(crate) fn add_count(&mut self, n: u64) {
+        self.count += n;
+    }
+
     /// Resets the number of bytes written to `0`.
     #[inline]
     pub(crate) fn reset_count(&mut self) {

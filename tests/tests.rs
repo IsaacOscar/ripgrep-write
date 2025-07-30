@@ -20,3 +20,5 @@ mod misc;
 mod multiline;
 // Regression tests.
 mod regression;
+// Tests for new features of ripgrep-write
+mod write;

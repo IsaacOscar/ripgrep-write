@@ -40,10 +40,10 @@ where
             while self.fill()? && self.core.match_by_line(self.rdr.buffer())? {
             }
         }
-        self.core.finish(
-            self.rdr.absolute_byte_offset(),
-            self.rdr.binary_byte_offset(),
-        )
+        let absolute_byte_offset = self.rdr.absolute_byte_offset();
+        let binary_byte_offset = self.rdr.binary_byte_offset();
+        drop(self.rdr); // Ensure reasources are freed (including closing files)
+        self.core.finish(absolute_byte_offset, binary_byte_offset)
     }
 
     fn fill(&mut self) -> Result<bool, S::Error> {
@@ -85,18 +85,18 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) struct SliceByLine<'s, M, S> {
+pub(crate) struct SliceByLine<'s, M, T, S> {
     core: Core<'s, M, S>,
-    slice: &'s [u8],
+    slice: T,
 }
 
-impl<'s, M: Matcher, S: Sink> SliceByLine<'s, M, S> {
+impl<'s, M: Matcher, T: AsRef<[u8]>, S: Sink> SliceByLine<'s, M, T, S> {
     pub(crate) fn new(
         searcher: &'s Searcher,
         matcher: M,
-        slice: &'s [u8],
+        slice: T,
         write_to: S,
-    ) -> SliceByLine<'s, M, S> {
+    ) -> SliceByLine<'s, M, T, S> {
         debug_assert!(!searcher.multi_line_with_matcher(&matcher));
 
         SliceByLine {
@@ -107,17 +107,21 @@ impl<'s, M: Matcher, S: Sink> SliceByLine<'s, M, S> {
 
     pub(crate) fn run(mut self) -> Result<(), S::Error> {
         if self.core.begin()? {
-            let binary_upto =
-                std::cmp::min(self.slice.len(), DEFAULT_BUFFER_CAPACITY);
+            let binary_upto = std::cmp::min(
+                self.slice.as_ref().len(),
+                DEFAULT_BUFFER_CAPACITY,
+            );
             let binary_range = Range::new(0, binary_upto);
-            if !self.core.detect_binary(self.slice, &binary_range)? {
-                while !self.slice[self.core.pos()..].is_empty()
-                    && self.core.match_by_line(self.slice)?
-                {}
+            if !self.core.detect_binary(self.slice.as_ref(), &binary_range)? {
+                while !self.slice.as_ref()[self.core.pos()..].is_empty()
+                    && self.core.match_by_line(self.slice.as_ref())?
+                {
+                }
             }
         }
         let byte_count = self.byte_count();
         let binary_byte_offset = self.core.binary_byte_offset();
+        drop(self.slice); // Ensure reasources are freed (including closing files)
         self.core.finish(byte_count, binary_byte_offset)
     }
 
@@ -130,20 +134,20 @@ impl<'s, M: Matcher, S: Sink> SliceByLine<'s, M, S> {
 }
 
 #[derive(Debug)]
-pub(crate) struct MultiLine<'s, M, S> {
+pub(crate) struct MultiLine<'s, M, T, S> {
     config: &'s Config,
     core: Core<'s, M, S>,
-    slice: &'s [u8],
+    slice: T,
     last_match: Option<Range>,
 }
 
-impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
+impl<'s, M: Matcher, T: AsRef<[u8]>, S: Sink> MultiLine<'s, M, T, S> {
     pub(crate) fn new(
         searcher: &'s Searcher,
         matcher: M,
-        slice: &'s [u8],
+        slice: T,
         write_to: S,
-    ) -> MultiLine<'s, M, S> {
+    ) -> MultiLine<'s, M, T, S> {
         debug_assert!(searcher.multi_line_with_matcher(&matcher));
 
         MultiLine {
@@ -156,12 +160,16 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
 
     pub(crate) fn run(mut self) -> Result<(), S::Error> {
         if self.core.begin()? {
-            let binary_upto =
-                std::cmp::min(self.slice.len(), DEFAULT_BUFFER_CAPACITY);
+            let binary_upto = std::cmp::min(
+                self.slice.as_ref().len(),
+                DEFAULT_BUFFER_CAPACITY,
+            );
             let binary_range = Range::new(0, binary_upto);
-            if !self.core.detect_binary(self.slice, &binary_range)? {
+            if !self.core.detect_binary(self.slice.as_ref(), &binary_range)? {
                 let mut keepgoing = true;
-                while !self.slice[self.core.pos()..].is_empty() && keepgoing {
+                while !self.slice.as_ref()[self.core.pos()..].is_empty()
+                    && keepgoing
+                {
                     keepgoing = self.sink()?;
                 }
                 if keepgoing {
@@ -179,13 +187,13 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
                 if keepgoing {
                     if self.config.passthru {
                         self.core.other_context_by_line(
-                            self.slice,
-                            self.slice.len(),
+                            self.slice.as_ref(),
+                            self.slice.as_ref().len(),
                         )?;
                     } else {
                         self.core.after_context_by_line(
-                            self.slice,
-                            self.slice.len(),
+                            self.slice.as_ref(),
+                            self.slice.as_ref().len(),
                         )?;
                     }
                 }
@@ -193,6 +201,7 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
         }
         let byte_count = self.byte_count();
         let binary_byte_offset = self.core.binary_byte_offset();
+        drop(self.slice); // Ensure reasources are freed (including closing files)
         self.core.finish(byte_count, binary_byte_offset)
     }
 
@@ -203,14 +212,17 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
         let mat = match self.find()? {
             Some(range) => range,
             None => {
-                self.core.set_pos(self.slice.len());
+                self.core.set_pos(self.slice.as_ref().len());
                 return Ok(true);
             }
         };
         self.advance(&mat);
 
-        let line =
-            lines::locate(self.slice, self.config.line_term.as_byte(), mat);
+        let line = lines::locate(
+            self.slice.as_ref(),
+            self.config.line_term.as_byte(),
+            mat,
+        );
         // We delay sinking the match to make sure we group adjacent matches
         // together in a single sink. Adjacent matches are distinct matches
         // that start and end on the same line, respectively. This guarantees
@@ -253,13 +265,14 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
 
         let invert_match = match self.find()? {
             None => {
-                let range = Range::new(self.core.pos(), self.slice.len());
+                let range =
+                    Range::new(self.core.pos(), self.slice.as_ref().len());
                 self.core.set_pos(range.end());
                 range
             }
             Some(mat) => {
                 let line = lines::locate(
-                    self.slice,
+                    self.slice.as_ref(),
                     self.config.line_term.as_byte(),
                     mat,
                 );
@@ -279,7 +292,7 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
             invert_match.start(),
             invert_match.end(),
         );
-        while let Some(line) = stepper.next_match(self.slice) {
+        while let Some(line) = stepper.next_match(self.slice.as_ref()) {
             if !self.sink_matched(&line)? {
                 return Ok(false);
             }
@@ -296,19 +309,28 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
             // point anyway, so stop the search.
             return Ok(false);
         }
-        self.core.matched(self.slice, range)
+        self.core.matched(self.slice.as_ref(), range)
     }
 
     fn sink_context(&mut self, range: &Range) -> Result<bool, S::Error> {
         if self.config.passthru {
-            if !self.core.other_context_by_line(self.slice, range.start())? {
+            if !self
+                .core
+                .other_context_by_line(self.slice.as_ref(), range.start())?
+            {
                 return Ok(false);
             }
         } else {
-            if !self.core.after_context_by_line(self.slice, range.start())? {
+            if !self
+                .core
+                .after_context_by_line(self.slice.as_ref(), range.start())?
+            {
                 return Ok(false);
             }
-            if !self.core.before_context_by_line(self.slice, range.start())? {
+            if !self
+                .core
+                .before_context_by_line(self.slice.as_ref(), range.start())?
+            {
                 return Ok(false);
             }
         }
@@ -316,7 +338,8 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
     }
 
     fn find(&mut self) -> Result<Option<Range>, S::Error> {
-        match self.core.matcher().find(&self.slice[self.core.pos()..]) {
+        match self.core.matcher().find(&self.slice.as_ref()[self.core.pos()..])
+        {
             Err(err) => Err(S::Error::error_message(err)),
             Ok(None) => Ok(None),
             Ok(Some(m)) => Ok(Some(m.offset(self.core.pos()))),
@@ -329,7 +352,7 @@ impl<'s, M: Matcher, S: Sink> MultiLine<'s, M, S> {
     /// position one byte past the end of the match.
     fn advance(&mut self, range: &Range) {
         self.core.set_pos(range.end());
-        if range.is_empty() && self.core.pos() < self.slice.len() {
+        if range.is_empty() && self.core.pos() < self.slice.as_ref().len() {
             let newpos = self.core.pos() + 1;
             self.core.set_pos(newpos);
         }
@@ -1530,7 +1553,7 @@ and exhibited clearly, with a label attached.\
         searcher
             .search_slice(
                 &matcher,
-                b"GATC\n",
+                &b"GATC\n"[..],
                 crate::sinks::UTF8(|_, _| {
                     matched = true;
                     Ok(true)

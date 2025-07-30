@@ -103,3 +103,32 @@ impl MmapChoice {
         }
     }
 }
+
+/// Implements io::Read whilst owning an Mmap and a File
+/// (By using this, instead of the &[u8] returned by mmap.as_ref(), we can make
+/// sure the Mmap and File are closed when the MmapReader is dropped)
+pub(crate) struct MmapReader {
+    mmap: Mmap,
+    pos: usize,
+    #[allow(dead_code)]
+    file: File,
+}
+impl MmapReader {
+    pub fn new(mmap: Mmap, file: File) -> MmapReader {
+        MmapReader { mmap, pos: 0, file }
+    }
+}
+use std::io::{Read, Result};
+impl AsRef<[u8]> for MmapReader {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.mmap[self.pos..]
+    }
+}
+impl Read for MmapReader {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let n = self.as_ref().read(buf)?; // This will never return an error
+        self.pos += n;
+        Ok(n)
+    }
+}

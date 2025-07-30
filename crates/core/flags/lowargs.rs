@@ -108,8 +108,8 @@ pub(crate) struct LowArgs {
     pub(crate) unrestricted: usize,
     pub(crate) vimgrep: bool,
     pub(crate) with_filename: Option<bool>,
+    pub(crate) write_to: Option<PathBuf>,
 }
-
 /// A "special" mode that supercedes everything else.
 ///
 /// When one of these modes is present, it overrides everything else and causes

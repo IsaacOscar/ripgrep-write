@@ -61,7 +61,7 @@ pub(crate) struct HiArgs {
     ignore_file: Vec<PathBuf>,
     include_zero: bool,
     invert_match: bool,
-    is_terminal_stdout: bool,
+    is_output_terminal: bool,
     line_number: bool,
     max_columns: Option<u64>,
     max_columns_preview: bool,
@@ -103,6 +103,7 @@ pub(crate) struct HiArgs {
     types: ignore::types::Types,
     vimgrep: bool,
     with_filename: bool,
+    write_to: Option<PathBuf>,
 }
 
 impl HiArgs {
@@ -139,7 +140,46 @@ impl HiArgs {
             _ => {}
         }
 
-        let mut state = State::new()?;
+        // Ensure any mode changes override write_to
+        if !matches!(low.mode, Mode::Search(SearchMode::Standard)) {
+            low.write_to = None;
+        }
+        // If we are going to overwrite the input files with -w/--write-replace
+        if low
+            .write_to
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            // Disable any output options that you probably don't want (and will this ruin your files!)
+            // Allow --passthru, but not --after-context, --before-context, or --context
+            if !matches!(low.context, ContextMode::Passthru) {
+                low.context = ContextMode::default();
+                low.context.set_both(usize::MAX);
+            }
+
+            low.color = ColorChoice::Never;
+            low.byte_offset = false;
+            low.column = Some(false);
+            low.line_number = Some(false);
+            low.max_columns = None;
+            low.only_matching = false;
+            low.vimgrep = false;
+            low.with_filename = Some(false);
+            low.context_separator = ContextSeparator::disabled();
+
+            // Ensure we don't use these input options, as writing back the data correctly will be too difficuilt
+            // (we don't simply disable the input options, as then the search itself will be wrong)
+            if low.search_zip {
+                // It would be nice to support this
+                anyhow::bail!("Overwriting input files when using -z / --search-zip is currently not supported");
+            }
+            if low.pre.is_some() {
+                // It would be nice to add a --post flag so you can undo --pre
+                anyhow::bail!("Overwriting input files when using --pre is currently not supported");
+            }
+        }
+
+        let mut state = State::new(low.write_to.is_none())?;
         let patterns = Patterns::from_low_args(&mut state, &mut low)?;
         let paths = Paths::from_low_args(&mut state, &patterns, &mut low)?;
 
@@ -152,14 +192,14 @@ impl HiArgs {
         let pre_globs = preprocessor_globs(&state, &low)?;
 
         let color = match low.color {
-            ColorChoice::Auto if !state.is_terminal_stdout => {
+            ColorChoice::Auto if !state.is_output_terminal => {
                 ColorChoice::Never
             }
             _ => low.color,
         };
         let column = low.column.unwrap_or(low.vimgrep);
         let heading = match low.heading {
-            None => !low.vimgrep && state.is_terminal_stdout,
+            None => !low.vimgrep && state.is_output_terminal,
             Some(false) => false,
             Some(true) => !low.vimgrep,
         };
@@ -212,7 +252,7 @@ impl HiArgs {
                     // default when printing to a tty for human consumption,
                     // except for one interesting case: when we're only
                     // searching stdin. This makes pipelines work as expected.
-                    (state.is_terminal_stdout && !paths.is_only_stdin())
+                    (state.is_output_terminal && !paths.is_only_stdin())
                         || column
                         || low.vimgrep
                 }
@@ -278,7 +318,7 @@ impl HiArgs {
             ignore_file_case_insensitive: low.ignore_file_case_insensitive,
             include_zero: low.include_zero,
             invert_match: low.invert_match,
-            is_terminal_stdout: state.is_terminal_stdout,
+            is_output_terminal: state.is_output_terminal,
             line_number,
             max_columns: low.max_columns,
             max_columns_preview: low.max_columns_preview,
@@ -318,6 +358,7 @@ impl HiArgs {
             types,
             vimgrep: low.vimgrep,
             with_filename,
+            write_to: low.write_to,
         })
     }
 
@@ -627,7 +668,11 @@ impl HiArgs {
             .stats(self.stats.is_some())
             .trim_ascii(self.trim)
             .ensure_eol(!self.no_ensure_eol)
-            .ensure_no_binary(self.binary.is_ignored());
+            .ensure_no_binary(self.binary.is_ignored())
+            .output_directory(
+                self.write_to.as_ref().map(|p| p.as_path()),
+                matches!(self.buffer, BufferMode::Auto | BufferMode::Block),
+            );
         // When doing multi-threaded searching, the buffer writer is
         // responsible for writing separators since it is the only thing that
         // knows whether something has been printed or not. But for the single
@@ -739,6 +784,9 @@ impl HiArgs {
                 builder.bom_sniffing(false);
             }
         }
+        builder.write_replace(
+            self.write_to.as_ref().is_some_and(|p| p.as_os_str().is_empty()),
+        );
         Ok(builder.build())
     }
 
@@ -831,7 +879,7 @@ impl HiArgs {
         let color = self.color.to_termcolor();
         match self.buffer {
             BufferMode::Auto => {
-                if self.is_terminal_stdout {
+                if self.is_output_terminal {
                     grep::cli::stdout_buffered_line(color)
                 } else {
                     grep::cli::stdout_buffered_block(color)
@@ -931,7 +979,7 @@ struct State {
     /// Whether it's believed that tty is connected to stdout. Note that on
     /// unix systems, this is always correct. On Windows, heuristics are used
     /// by Rust's standard library, particularly for cygwin/MSYS environments.
-    is_terminal_stdout: bool,
+    is_output_terminal: bool,
     /// Whether stdin has already been consumed. This is useful to know and for
     /// providing good error messages when the user has tried to read from stdin
     /// in two different places. For example, `rg -f - -`.
@@ -945,11 +993,11 @@ impl State {
     ///
     /// Note that the state values may change throughout the lifetime of
     /// argument parsing.
-    fn new() -> anyhow::Result<State> {
+    fn new(to_stdout: bool) -> anyhow::Result<State> {
         use std::io::IsTerminal;
 
         Ok(State {
-            is_terminal_stdout: std::io::stdout().is_terminal(),
+            is_output_terminal: to_stdout && std::io::stdout().is_terminal(),
             stdin_consumed: false,
             cwd: current_dir()?,
         })

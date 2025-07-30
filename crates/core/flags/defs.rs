@@ -127,6 +127,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &Quiet,
     &RegexSizeLimit,
     &Replace,
+    &ReplacePassthru,
     &SearchZip,
     &SmartCase,
     &Sort,
@@ -148,6 +149,8 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &WithFilename,
     &WithFilenameNo,
     &WordRegexp,
+    &WriteReplace,
+    &WriteTo,
     // DEPRECATED (make them show up last in their respective categories)
     &AutoHybridRegex,
     &NoPcre2Unicode,
@@ -1576,7 +1579,7 @@ this case only applies to files that begin with a UTF-8 or UTF-16 byte-order
 mark (BOM). No other automatic detection is performed. One can also specify
 \fBnone\fP which will then completely disable BOM sniffing and always result
 in searching the raw bytes, including a BOM if it's present, regardless of its
-encoding.
+encoding (i.e. \flag{no-strip-bom} is implied).
 .sp
 Other supported values can be found in the list of labels here:
 \fIhttps://encoding.spec.whatwg.org/#concept-encoding-get\fP.
@@ -1762,6 +1765,7 @@ impl Flag for EnsureNoBinary {
     fn doc_long(&self) -> &'static str {
         r"
 TODO: Document,
+problem with legacy windows console...
 this is like \flag{no-binary}, but extra strict
 
 "
@@ -5367,6 +5371,7 @@ This overrides the \flag{context}, \flag{after-context} and
 
     fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
         assert!(v.unwrap_switch(), "--passthru-only-matching has no negation");
+        args.context = ContextMode::default(); // Ensure any -A or -B settings are overriden
         args.context.set_both(usize::MAX);
         Ok(())
     }
@@ -5380,6 +5385,9 @@ fn test_passthru_only_matching() {
 
     let args = parse_low_raw(None::<&str>).unwrap();
     assert_eq!(ContextMode::default(), args.context);
+
+    let args = parse_low_raw(["-A10", "--passthru-only-matching"]).unwrap();
+    assert_eq!(ctx, args.context);
 
     let args = parse_low_raw(["--passthru-only-matching"]).unwrap();
     assert_eq!(ctx, args.context);
@@ -6117,6 +6125,94 @@ fn test_replace() {
 
     let args = parse_low_raw(["-r", "foo", "-r", ""]).unwrap();
     assert_eq!(Some(BString::from("")), args.replace);
+}
+
+/// -R/--replace-passthru
+#[derive(Debug)]
+struct ReplacePassthru;
+
+impl Flag for ReplacePassthru {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_short(&self) -> Option<u8> {
+        Some(b'R')
+    }
+    fn name_long(&self) -> &'static str {
+        "replace-passthru"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("REPLACEMENT")
+    }
+    fn doc_category(&self) -> Category {
+        Category::Output
+    }
+    fn doc_short(&self) -> &'static str {
+        r"TODO"
+    }
+    fn doc_long(&self) -> &'static str {
+        r#"
+TODO: make a note in the documentation that empty files do not get replaced
+Like \flag{replace}, but passthrough
+"#
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        args.replace = Some(convert::string(v.unwrap_value())?.into()); // --replace REPLACEMENT
+        args.context.set_both(usize::MAX); // --passthru-only-matchinbg
+        args.no_ensure_eol = true; // --no-ensure-eol
+        if args.binary != BinaryMode::AsText {
+            // if not --text
+            args.binary = BinaryMode::EnsureIgnored; // --ensure-no-binary
+        }
+        use crate::flags::lowargs::ContextSeparator as Separator;
+        // Sadly, there's no way to distinguish between the user not having provided a --context-seperator
+        // or their being a --context-seperator --, so I just disable it uncodnitionally
+        args.context_separator = Separator::disabled(); // -- no-context-separator
+
+        // Default these to false if not manually specified
+        args.line_number = args.line_number.or(Some(false)); // --no-line-number
+        args.with_filename = args.with_filename.or(Some(false)); // --no-filename
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_replace_passthru() {
+    use crate::flags::lowargs::ContextSeparator as Separator;
+    use bstr::BString;
+
+    let mut ctx = ContextMode::default();
+    let sep = Separator::disabled();
+    ctx.set_both(usize::MAX);
+
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(None, args.replace);
+
+    let args = parse_low_raw(["--replace-passthru", "foo"]).unwrap();
+    assert_eq!(Some(BString::from("foo")), args.replace);
+    assert_eq!(ctx, args.context);
+    assert_eq!(true, args.no_ensure_eol);
+    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
+    assert_eq!(sep, args.context_separator);
+    assert_eq!(Some(false), args.line_number);
+    assert_eq!(Some(false), args.with_filename);
+
+    let args = parse_low_raw(["--replace-passthru", "-foo"]).unwrap();
+    assert_eq!(Some(BString::from("-foo")), args.replace);
+
+    let args = parse_low_raw(["-R", "foo"]).unwrap();
+    assert_eq!(Some(BString::from("foo")), args.replace);
+
+    let args = parse_low_raw(["-a", "-Rbar"]).unwrap();
+    assert_eq!(BinaryMode::AsText, args.binary);
+    assert_eq!(Some(BString::from("bar")), args.replace);
+
+    let args = parse_low_raw(["-Hnrbar"]).unwrap();
+    assert_eq!(Some(true), args.with_filename);
+    assert_eq!(Some(true), args.line_number);
+    assert_eq!(Some(BString::from("bar")), args.replace);
 }
 
 /// -z/--search-zip
@@ -7609,6 +7705,157 @@ This overrides the \flag{line-regexp} flag.
         args.boundary = Some(BoundaryMode::Word);
         Ok(())
     }
+}
+
+/// -W/--write-replace
+#[derive(Debug)]
+struct WriteReplace;
+
+impl Flag for WriteReplace {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_short(&self) -> Option<u8> {
+        Some(b'W')
+    }
+    fn name_long(&self) -> &'static str {
+        "write-replace"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("REPLACEMENT")
+    }
+    fn doc_category(&self) -> Category {
+        Category::OutputModes
+    }
+    fn doc_short(&self) -> &'static str {
+        r""
+    }
+    fn doc_long(&self) -> &'static str {
+        r"TODO: This is like \fB\-R REPLACEMENT\fP, but the results are written back to the input files."
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        // same settings as --replace-passthru REPLACEMENT
+        args.replace = Some(convert::string(v.unwrap_value())?.into());
+        args.context.set_both(usize::MAX);
+        args.no_ensure_eol = true;
+        if args.binary != BinaryMode::AsText {
+            args.binary = BinaryMode::EnsureIgnored;
+        }
+        args.line_number = args.line_number.or(Some(false));
+        args.with_filename = args.with_filename.or(Some(false));
+
+        // same settings as --write-to "" would do
+        args.write_to = Some(PathBuf::from(""));
+        args.mode.update(Mode::Search(SearchMode::Standard));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_write_replace() {
+    use bstr::BString;
+
+    let mut ctx = ContextMode::default();
+    ctx.set_both(usize::MAX);
+    let args = parse_low_raw(["--write-replace", "foo"]).unwrap();
+    assert_eq!(Some(BString::from("foo")), args.replace);
+    assert_eq!(ctx, args.context);
+    assert_eq!(true, args.no_ensure_eol);
+    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
+    assert_eq!(Some(false), args.line_number);
+    assert_eq!(Some(false), args.with_filename);
+    assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
+
+    let args = parse_low_raw(["--ensure-eol", "--write-replace=foo"]).unwrap();
+    assert_eq!(true, args.no_ensure_eol);
+
+    let args = parse_low_raw(["-W", "foo", "-n"]).unwrap();
+    assert_eq!(Some(PathBuf::from("")), args.write_to);
+    assert_eq!(Some(BString::from("foo")), args.replace);
+    assert_eq!(Some(true), args.line_number); // This will be override in HiArgs::from_low_args
+
+    let args = parse_low_raw(["-a", "-Wfoo"]).unwrap();
+    assert_eq!(Some(PathBuf::from("")), args.write_to);
+    assert_eq!(Some(BString::from("foo")), args.replace);
+    assert_eq!(BinaryMode::AsText, args.binary);
+
+    let args =
+        parse_low_raw(["--files", "-W", "foo", "-O", "/some/path"]).unwrap();
+    assert_eq!(Some(PathBuf::from("/some/path")), args.write_to);
+    assert_eq!(Some(BString::from("foo")), args.replace);
+    assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
+}
+
+/// -O/--write-to
+#[derive(Debug)]
+struct WriteTo;
+
+impl Flag for WriteTo {
+    fn is_switch(&self) -> bool {
+        false
+    }
+    fn name_short(&self) -> Option<u8> {
+        Some(b'O')
+    }
+    fn name_long(&self) -> &'static str {
+        "write-to"
+    }
+    fn doc_variable(&self) -> Option<&'static str> {
+        Some("DIR")
+    }
+    fn doc_category(&self) -> Category {
+        Category::OutputModes
+    }
+    fn doc_short(&self) -> &'static str {
+        r"TODO: Document."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+TODO: document
+Explanation.
+Also implies \flag{no-filename}
+Note that statistics and error messages are NOT written to the files
+.sp
+This ignores the \flag{quiet}, \flag{count}, \flag{count-matches}, \flag{files-with-matches}, \flag{files-without-match}, and \flag{json} flags.
+"
+    }
+    fn completion_type(&self) -> CompletionType {
+        CompletionType::Filetype
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        let path = v.unwrap_value();
+        if path == "" {
+            anyhow::bail!("-O/--write-to requires a path.")
+        }
+        args.write_to = Some(PathBuf::from(path));
+        // Don't print the filename unless explicitely requested as it's not usefull
+        args.with_filename = args.with_filename.or(Some(false)); // --no-filename
+        args.mode.update(Mode::Search(SearchMode::Standard)); // Disables --count, --count-matches, --files-with-matches, --files-without-match, --json
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_write_to() {
+    let args = parse_low_raw(["--write-to", "folder"]).unwrap();
+    assert_eq!(Some(PathBuf::from("folder")), args.write_to);
+    assert_eq!(Some(false), args.with_filename);
+
+    let args = parse_low_raw(["--files", "--write-to", "."]).unwrap();
+    assert_eq!(Some(PathBuf::from(".")), args.write_to);
+    assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
+
+    let args = parse_low_raw(["--write-to", "/path", "--json"]).unwrap();
+    assert_eq!(Some(PathBuf::from("/path")), args.write_to);
+    assert_eq!(Mode::Search(SearchMode::JSON), args.mode);
+
+    let args = parse_low_raw(["-O", "/some/path", "--ensure-eol"]).unwrap();
+    assert_eq!(Some(PathBuf::from("/some/path")), args.write_to);
+    assert_eq!(false, args.no_ensure_eol);
 }
 
 #[cfg(test)]

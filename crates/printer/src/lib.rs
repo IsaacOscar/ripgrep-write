@@ -89,7 +89,6 @@ const MAX_LOOK_AHEAD: usize = 128;
 #[macro_use]
 mod macros;
 
-mod cancellable_writer;
 mod color;
 mod counter;
 mod hyperlink;
@@ -98,6 +97,7 @@ mod hyperlink_aliases;
 mod json;
 #[cfg(feature = "serde")]
 mod jsont;
+mod multi_writer;
 mod path;
 mod standard;
 mod stats;

@@ -1,13 +1,14 @@
+#![allow(dead_code)]
 use std::env;
 use std::error;
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bstr::ByteSlice;
 
@@ -63,6 +64,13 @@ pub struct Dir {
     pcre2: bool,
 }
 
+/// FileTimestamps represents the times associated with a file
+#[derive(Clone, Debug)]
+pub struct FileTimestamps {
+    pub created: SystemTime,
+    pub accessed: SystemTime,
+    pub modified: SystemTime,
+}
 impl Dir {
     /// Create a new test working directory with the given name. The name
     /// does not need to be distinct for each invocation, but should correspond
@@ -98,6 +106,57 @@ impl Dir {
     /// or panic on error.
     pub fn create<P: AsRef<Path>>(&self, name: P, contents: &str) {
         self.create_bytes(name, contents.as_bytes());
+    }
+
+    /// Returns the contents of the file with the given name (panics if it's not valid UTF-8)
+    pub fn read<P: AsRef<Path>>(&self, name: P) -> String {
+        let path = self.dir.join(name);
+        nice_err(&path, fs::read_to_string(&path))
+    }
+
+    /// Returns the bytes storded in the file with the given name
+    pub fn read_bytes<P: AsRef<Path>>(&self, name: P) -> Vec<u8> {
+        let path = self.dir.join(name);
+        nice_err(&path, fs::read(&path))
+    }
+
+    /// Returns the target of the symbolic link with the given name
+    pub fn read_link<P: AsRef<Path>>(&self, name: P) -> PathBuf {
+        let path = self.dir.join(name);
+        nice_err(&path, fs::read_link(&path))
+    }
+
+    /// Returns a sorted list of all files/directories recursively
+    pub fn list(&self) -> Vec<String> {
+        let mut res = Vec::new();
+        self.list_recur("".as_ref(), &mut res);
+        // Sort it in case the OS didn't do that for us.
+        res.sort();
+        res
+    }
+    fn list_recur(&self, prefix: &Path, res: &mut Vec<String>) {
+        let path = self.dir.join(prefix);
+        for entry in nice_err(&path, fs::read_dir(&path)) {
+            let entry = nice_err(&path, entry);
+            let new_prefix = prefix.join(entry.file_name());
+            if !entry.path().is_symlink() && entry.path().is_dir() {
+                self.list_recur(&new_prefix, res)
+            }
+            // Ensure path seperator is the same accross platforms
+            res.push(new_prefix.to_str().unwrap().replace("\\", "/"));
+        }
+    }
+    /// Gets the created, accessed, & modified times of the file with the given name
+    pub fn read_timestamps<P: AsRef<Path>>(&self, name: P) -> FileTimestamps {
+        let path = self.dir.join(name);
+        let metadata = nice_err(&path, fs::metadata(&path));
+        // According to the rust documentation, some OS's don't support these metadata fields
+        // (so the nice_err calls will fail with an error). This seems to work on Linux and Windows
+        FileTimestamps {
+            created: nice_err(&path, metadata.created()),
+            accessed: nice_err(&path, metadata.accessed()),
+            modified: nice_err(&path, metadata.modified()),
+        }
     }
 
     /// Try to create a new file with the given name and contents in this
@@ -145,6 +204,20 @@ impl Dir {
         nice_err(&path, fs::remove_file(&path));
     }
 
+    /// Remove a file or directory with the given name from this directory.
+    pub fn remove_maybe_dir<P: AsRef<Path>>(&self, name: P) {
+        let path = self.dir.join(name);
+        // Sadly fs::remove_file only works on files, and fs::remove_dir_all only works on directories
+        // So just try both (remove_dir_all must come first on Windows, as remove_fiel gives an access denied)
+        let res = match fs::remove_dir_all(&path) {
+            Err(e) if e.kind() == ErrorKind::NotADirectory => {
+                fs::remove_file(&path)
+            }
+            res => res,
+        };
+        nice_err(&path, res);
+    }
+
     /// Create a new directory with the given path (and any directories above
     /// it) inside this directory.
     pub fn create_dir<P: AsRef<Path>>(&self, path: P) {
@@ -172,6 +245,15 @@ impl Dir {
         TestCommand { dir: self.clone(), cmd }
     }
 
+    /// Like command, but also ensures the working directory is clean
+    /// (i.e. deletes everything in `self.path()`)
+    pub fn clean_command(&self) -> TestCommand {
+        // Just delete the whole directory and recreate it
+        nice_err(&self.dir, fs::remove_dir_all(&self.dir));
+        nice_err(&self.dir, fs::create_dir(&self.dir));
+        self.command()
+    }
+
     /// Returns the path to the ripgrep executable.
     pub fn bin(&self) -> process::Command {
         let rg = self.root.join(format!("../rg{}", env::consts::EXE_SUFFIX));
@@ -188,6 +270,11 @@ impl Dir {
     /// Returns the path to this directory.
     pub fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// Returns the path to the given file.
+    pub fn path_of<P: AsRef<Path>>(&self, name: P) -> PathBuf {
+        self.dir.join(name)
     }
 
     /// Creates a directory symlink to the src with the given target name
@@ -293,7 +380,7 @@ impl TestCommand {
         self.cmd.stdout(process::Stdio::piped());
         self.cmd.stderr(process::Stdio::piped());
 
-        let mut child = self.cmd.spawn().unwrap();
+        let mut child = self._spawn().unwrap();
 
         // Pipe input to child process using a separate thread to avoid
         // risk of deadlock between parent and child process.
@@ -308,6 +395,7 @@ impl TestCommand {
     }
 
     /// Gets the output of a command. If the command failed, then this panics.
+    /// It also panics if anything was written to stderr
     pub fn output(&mut self) -> process::Output {
         let output = self.raw_output();
         self.expect_success(output)
@@ -316,9 +404,18 @@ impl TestCommand {
     /// Gets the raw output of a command after filtering nonsense like jemalloc
     /// error messages from stderr.
     pub fn raw_output(&mut self) -> process::Output {
-        let mut output = self.cmd.output().unwrap();
+        let mut output = self._output().unwrap();
         output.stderr = strip_jemalloc_nonsense(&output.stderr);
         output
+    }
+
+    pub fn _output(&mut self) -> std::io::Result<std::process::Output> {
+        eprintln!("Running {:?}", self.cmd);
+        self.cmd.output()
+    }
+    pub fn _spawn(&mut self) -> std::io::Result<std::process::Child> {
+        eprintln!("Running {:?}", self.cmd);
+        self.cmd.spawn()
     }
 
     /// Runs the command and asserts that it resulted in an error exit code.
@@ -346,7 +443,8 @@ impl TestCommand {
     /// Runs the command and asserts that its exit code matches expected exit
     /// code.
     pub fn assert_exit_code(&mut self, expected_code: i32) {
-        let code = self.cmd.output().unwrap().status.code().unwrap();
+        let o = self.raw_output();
+        let code = o.status.code().unwrap();
         assert_eq!(
             expected_code,
             code,
@@ -356,18 +454,48 @@ impl TestCommand {
              \n\ndir list: {:?}\
              \n\nexpected: {}\
              \n\nfound: {}\
+             \n\nstdout: {}\n\nstderr: {}\
              \n\n=====\n",
             self.cmd,
             self.dir.dir.display(),
             dir_list(&self.dir.dir),
             expected_code,
-            code
+            code,
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
         );
+    }
+
+    /// Runs the command, asserts that its exit code matches expected exit
+    /// code, and returns stderr
+    pub fn stderr(&mut self, expected_code: i32) -> String {
+        let o = self.raw_output();
+        let code = o.status.code().unwrap();
+        assert_eq!(
+            expected_code,
+            code,
+            "\n\n===== {:?} =====\n\
+             expected exit code did not match\
+             \n\ncwd: {}\
+             \n\ndir list: {:?}\
+             \n\nexpected: {}\
+             \n\nfound: {}\
+             \n\nstdout: {}\n\nstderr: {}\
+             \n\n=====\n",
+            self.cmd,
+            self.dir.dir.display(),
+            dir_list(&self.dir.dir),
+            expected_code,
+            code,
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stderr).into_owned()
     }
 
     /// Runs the command and asserts that something was printed to stderr.
     pub fn assert_non_empty_stderr(&mut self) {
-        let o = self.cmd.output().unwrap();
+        let o = self._output().unwrap();
         if o.status.success() || o.stderr.is_empty() {
             panic!(
                 "\n\n===== {:?} =====\n\
@@ -388,7 +516,7 @@ impl TestCommand {
     }
 
     fn expect_success(&self, o: process::Output) -> process::Output {
-        if !o.status.success() {
+        if !o.status.success() || !o.stderr.is_empty() {
             let suggest = if o.stderr.is_empty() {
                 "\n\nDid your search end up with no results?".to_string()
             } else {
@@ -419,7 +547,7 @@ impl TestCommand {
     }
 }
 
-fn nice_err<T, E: error::Error>(path: &Path, res: Result<T, E>) -> T {
+pub fn nice_err<T, E: error::Error>(path: &Path, res: Result<T, E>) -> T {
     match res {
         Ok(t) => t,
         Err(err) => panic!("{}: {:?}", path.display(), err),

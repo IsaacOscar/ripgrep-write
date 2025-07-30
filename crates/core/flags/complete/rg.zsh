@@ -178,6 +178,10 @@ _rg() {
     '--json[output results in JSON Lines format]'
     $no"--no-json[don't output results in JSON Lines format]"
 
+    + '(write-to)' # Write options
+    {-O+,--write-to=}'[specify driectory to store output in]: :_files'
+
+
     + '(line-number)' # Line-number options
     {-n,--line-number}'[show line numbers for matches]'
     {-N,--no-line-number}"[don't show line numbers for matches]"
@@ -253,6 +257,8 @@ _rg() {
 
     + '(replace)' # Replacement options
     {-r+,--replace=}'[specify string used to replace matches]:replace string'
+    {-R+,--replace-passthru=}'[specify string used to output file contents with matches replaced]:replace string'
+    {-W+,--write-replace=}'[specify string used to replace matches, modifying files in place]:replace string'
 
     + '(sort)' # File-sorting options
     '(threads)--sort=[sort results in ascending order (disables parallelism)]:sort method:((
