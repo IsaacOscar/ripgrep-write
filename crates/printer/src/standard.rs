@@ -57,7 +57,6 @@ struct Config {
     separator_path: Option<u8>,
     path_terminator: Option<u8>,
     ensure_eol: bool,
-    ensure_no_binary: bool,
     output_directory: Option<PathBuf>,
     buffer_files: bool,
 }
@@ -87,7 +86,6 @@ impl<'a> Default for Config {
             separator_path: None,
             path_terminator: None,
             ensure_eol: true,
-            ensure_no_binary: false,
             output_directory: None,
             buffer_files: true,
         }
@@ -140,7 +138,6 @@ impl StandardBuilder {
             config: self.config.clone(),
             wtr: RefCell::new(MultiWriter::new_with_file_output(
                 wtr,
-                self.config.ensure_no_binary,
                 self.config.output_directory.clone(), // It's easier to clone than deal with lifetimes
                 self.config.buffer_files,
             )),
@@ -495,12 +492,6 @@ impl StandardBuilder {
         self
     }
 
-    /// Whether to ensure that results for binary files are never printed
-    pub fn ensure_no_binary(&mut self, ensure: bool) -> &mut StandardBuilder {
-        self.config.ensure_no_binary = ensure;
-        self
-    }
-
     /// Which directory to store any per-file output to (if any)
     /// And whether to use a buffer when writing files to it
     pub fn output_directory(
@@ -824,8 +815,8 @@ impl<'p, 's, M: Matcher, W: WriteColor> StandardSink<'p, 's, M, W> {
     /// Returns true if this printer should quit.
     ///
     /// This must return false if we still need to check if the file is binary or not.
-    fn should_quit(&self) -> bool {
-        !self.standard.config.ensure_no_binary && self.should_stop_printing()
+    fn should_quit(&self, searcher: &Searcher) -> bool {
+        !searcher.binary_detection().is_strict() && self.should_stop_printing()
     }
 
     /// Returns true if this printer should stop printing.
@@ -899,7 +890,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         }
 
         StandardImpl::from_match(searcher, self, mat).sink()?;
-        Ok(!self.should_quit())
+        Ok(!self.should_quit(searcher))
     }
 
     fn context(
@@ -928,7 +919,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
         }
 
         StandardImpl::from_context(searcher, self, ctx).sink()?;
-        Ok(!self.should_quit())
+        Ok(!self.should_quit(searcher))
     }
 
     fn context_break(
@@ -953,7 +944,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for StandardSink<'p, 's, M, W> {
                 );
             }
         }
-        if self.standard.config.ensure_no_binary {
+        if searcher.binary_detection().is_strict() {
             self.standard.wtr.borrow_mut().cancel();
             // Forget if we made any matches
             self.match_count = 0;
@@ -4222,26 +4213,30 @@ but Doctor Watson has to have it taken out for him and \x1b[0m\x1b[1m\x1b[31mdus
     }
 
     #[test]
-    fn ensure_no_binary() {
+    fn strict_no_binary() {
         let matcher = RegexMatcher::new(".").unwrap();
-        let searcher = SearcherBuilder::new()
-            .line_number(false)
-            .binary_detection(grep_searcher::BinaryDetection::quit(b'\x00'))
-            .build();
+        for strict_no_binary in [true, false] {
+            let binary = if strict_no_binary {
+                grep_searcher::BinaryDetection::strict_quit(b'\x00')
+            } else {
+                grep_searcher::BinaryDetection::quit(b'\x00')
+            };
+            let searcher = SearcherBuilder::new()
+                .line_number(false)
+                .binary_detection(binary)
+                .build();
 
-        for ensure_no_binary in [true, false] {
             for max_matches in [None, Some(1)] {
                 let mut printer = StandardBuilder::new()
                     .stats(true)
                     .max_matches(max_matches)
-                    .ensure_no_binary(ensure_no_binary)
                     .build(NoColor::new(vec![]));
                 let mut sink = printer.sink(&matcher);
                 let mut searcher = searcher.clone();
                 searcher
                     .search_reader(&matcher, &b"X\n\n\x00Y"[..], &mut sink)
                     .unwrap();
-                if ensure_no_binary {
+                if strict_no_binary {
                     assert_eq!(sink.binary_byte_offset(), Some(3));
                     assert_eq!(sink.has_match(), false);
                 } else if max_matches.is_some() {
@@ -4260,7 +4255,7 @@ but Doctor Watson has to have it taken out for him and \x1b[0m\x1b[1m\x1b[31mdus
 
                 let stats = sink.stats().unwrap().clone();
                 let got = printer_contents(&mut printer);
-                let expected = if ensure_no_binary {
+                let expected = if strict_no_binary {
                     r#"Z
 "#
                 } else if max_matches.is_some() {
@@ -4276,7 +4271,7 @@ Z
                 assert_eq_printed!(expected, got);
                 assert_eq!(stats.bytes_printed(), got.len() as u64);
                 assert_eq!(stats.searches(), 2);
-                if ensure_no_binary {
+                if strict_no_binary {
                     assert_eq!(stats.searches_with_match(), 1);
                     assert_eq!(
                         stats.bytes_searched(),

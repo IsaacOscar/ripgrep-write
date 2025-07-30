@@ -238,11 +238,12 @@ impl Dir {
         let mut cmd = self.bin();
         cmd.env_remove("RIPGREP_CONFIG_PATH");
         cmd.current_dir(&self.dir);
+        let prefix = format!("{:?}", cmd);
         cmd.arg("--path-separator").arg("/");
         if self.is_pcre2() {
             cmd.arg("--pcre2");
         }
-        TestCommand { dir: self.clone(), cmd }
+        TestCommand { dir: self.clone(), cmd, prefix }
     }
 
     /// Like command, but also ensures the working directory is clean
@@ -334,6 +335,8 @@ pub struct TestCommand {
     dir: Dir,
     /// The actual command we use to control the process.
     cmd: Command,
+    /// Just for debugging (this is trimmed from the printed form of cmd)
+    prefix: String,
 }
 
 impl TestCommand {
@@ -380,7 +383,8 @@ impl TestCommand {
         self.cmd.stdout(process::Stdio::piped());
         self.cmd.stderr(process::Stdio::piped());
 
-        let mut child = self._spawn().unwrap();
+        self.eprint();
+        let mut child = self.cmd.spawn().unwrap();
 
         // Pipe input to child process using a separate thread to avoid
         // risk of deadlock between parent and child process.
@@ -404,18 +408,18 @@ impl TestCommand {
     /// Gets the raw output of a command after filtering nonsense like jemalloc
     /// error messages from stderr.
     pub fn raw_output(&mut self) -> process::Output {
-        let mut output = self._output().unwrap();
+        self.eprint();
+        let mut output = self.cmd.output().unwrap();
         output.stderr = strip_jemalloc_nonsense(&output.stderr);
         output
     }
 
-    pub fn _output(&mut self) -> std::io::Result<std::process::Output> {
-        eprintln!("Running {:?}", self.cmd);
-        self.cmd.output()
-    }
-    pub fn _spawn(&mut self) -> std::io::Result<std::process::Child> {
-        eprintln!("Running {:?}", self.cmd);
-        self.cmd.spawn()
+    /// Prints the command we are about to execute to stderr, together with it's working directory
+    fn eprint(&self) {
+        let cwd = format!("{}", self.cmd.get_current_dir().unwrap().display());
+        let cmd = format!("{:?}", self.cmd);
+        let cmd = cmd.trim_start_matches(&self.prefix);
+        eprintln!("cwd: {}\ncmd: rg{}{}\n", cwd, env::consts::EXE_SUFFIX, cmd);
     }
 
     /// Runs the command and asserts that it resulted in an error exit code.
@@ -495,7 +499,8 @@ impl TestCommand {
 
     /// Runs the command and asserts that something was printed to stderr.
     pub fn assert_non_empty_stderr(&mut self) {
-        let o = self._output().unwrap();
+        self.eprint();
+        let o = self.cmd.output().unwrap();
         if o.status.success() || o.stderr.is_empty() {
             panic!(
                 "\n\n===== {:?} =====\n\

@@ -37,7 +37,6 @@ struct Config {
     separator_field: Arc<Vec<u8>>,
     separator_path: Option<u8>,
     path_terminator: Option<u8>,
-    ensure_no_binary: bool,
 }
 
 impl Default for Config {
@@ -53,7 +52,6 @@ impl Default for Config {
             separator_field: Arc::new(b":".to_vec()),
             separator_path: None,
             path_terminator: None,
-            ensure_no_binary: false,
         }
     }
 }
@@ -341,12 +339,6 @@ impl SummaryBuilder {
         self.config.path_terminator = terminator;
         self
     }
-
-    /// Whether to ensure that results for binary files are never printed
-    pub fn ensure_no_binary(&mut self, ensure: bool) -> &mut SummaryBuilder {
-        self.config.ensure_no_binary = ensure;
-        self
-    }
 }
 
 /// The summary printer, which emits aggregate results from a search.
@@ -567,8 +559,8 @@ impl<'p, 's, M: Matcher, W: WriteColor> SummarySink<'p, 's, M, W> {
     /// amount of matches. In most cases, the logic is simple, but we must
     /// permit all "after" contextual lines to print after reaching the limit.
     /// Note that we must not quit if we still need to check if the file is binary or not
-    fn should_quit(&self) -> bool {
-        if self.summary.config.ensure_no_binary {
+    fn should_quit(&self, searcher: &Searcher) -> bool {
+        if searcher.binary_detection().is_strict() {
             return false;
         }
         let limit = match self.summary.config.max_matches {
@@ -703,12 +695,12 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
         if self.stats.is_some() {
             self.stats_match_count += sink_match_count;
             self.stats_matched_line_count += mat.lines().count() as u64;
-        } else if !self.summary.config.ensure_no_binary
+        } else if !searcher.binary_detection().is_strict()
             && self.summary.config.kind.quit_early()
         {
             return Ok(false);
         }
-        Ok(!self.should_quit())
+        Ok(!self.should_quit(searcher))
     }
 
     fn binary_data(
@@ -757,7 +749,7 @@ impl<'p, 's, M: Matcher, W: WriteColor> Sink for SummarySink<'p, 's, M, W> {
         finish: &SinkFinish,
     ) -> Result<(), io::Error> {
         self.binary_byte_offset = finish.binary_byte_offset();
-        if self.summary.config.ensure_no_binary
+        if searcher.binary_detection().is_strict()
             && self.binary_byte_offset.is_some()
         {
             self.summary.wtr.borrow_mut().cancel();
@@ -1200,20 +1192,23 @@ and exhibited clearly, with a label attached.
     }
 
     #[test]
-    fn ensure_no_binary() {
+    fn strict_no_binary() {
         let matcher = RegexMatcher::new(".").unwrap();
-        let searcher = SearcherBuilder::new()
-            .line_number(false)
-            .binary_detection(grep_searcher::BinaryDetection::quit(b'\x00'))
-            .build();
+        for strict_no_binary in [true, false] {
+            let binary = if strict_no_binary {
+                grep_searcher::BinaryDetection::strict_quit(b'\x00')
+            } else {
+                grep_searcher::BinaryDetection::quit(b'\x00')
+            };
+            let searcher = SearcherBuilder::new()
+                .line_number(false)
+                .binary_detection(binary)
+                .build();
 
-        for ensure_no_binary in [true, false] {
             for kind in [SummaryKind::PathWithMatch, SummaryKind::Quiet] {
-                println!("{ensure_no_binary} {kind:?}");
-                // Enabling stats causes the the entire file to be searched regardless of ensure_no_binary
+                // Note that enabling stats causes the the entire file to be searched regardless of the binary detection
                 let mut printer = SummaryBuilder::new()
                     .kind(kind)
-                    .ensure_no_binary(ensure_no_binary)
                     .build(NoColor::new(vec![]));
                 let mut sink = printer.sink_with_path(&matcher, "File1");
                 let mut searcher = searcher.clone();
@@ -1221,7 +1216,7 @@ and exhibited clearly, with a label attached.
                     .search_reader(&matcher, &b"X\n\n\x00Y"[..], &mut sink)
                     .unwrap();
 
-                if ensure_no_binary {
+                if strict_no_binary {
                     assert_eq!(sink.binary_byte_offset(), Some(3));
                     assert_eq!(sink.has_match(), false);
                 } else {
@@ -1238,7 +1233,7 @@ and exhibited clearly, with a label attached.
 
                 let got = printer_contents(&mut printer);
                 let expected = if kind == SummaryKind::PathWithMatch {
-                    if ensure_no_binary {
+                    if strict_no_binary {
                         "File2\n"
                     } else {
                         "File1\nFile2\n"

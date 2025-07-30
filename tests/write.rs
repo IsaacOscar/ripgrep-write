@@ -1,8 +1,6 @@
 #![allow(unused)]
 // TODO: remove 'allows'
-use crate::hay::{
-    SHERLOCK, SHERLOCK_CRLF, SHERLOCK_MIXED_CRLF, SHERLOCK_NO_EOL,
-};
+use crate::hay::*;
 use crate::util::{cmd_exists, nice_err, Dir, TestCommand};
 use encoding_rs::mem as encoding;
 use regex::Regex;
@@ -14,9 +12,10 @@ use std::{
     thread,
     time::{Duration, SystemTime},
 };
-const BOM: char = '\u{FEFF}'; // The byte order mark
-static SHERLOCK_BOM: &'static str = const_format::concatc!(BOM, SHERLOCK);
-const SHERLOCK_NUL: &'static str = include_str!("./data/sherlock-nul.txt"); // Has a nul byte somewhere
+
+fn locksher(str: &str) -> String {
+    str.replace("Sherlock", "Locksher")
+}
 
 /// A test that the main -W / --write-replace flag works with a simple replacement, and with files with some unusual bytes
 rgtest!(write_replace_strange, |dir: Dir, _| {
@@ -25,6 +24,7 @@ rgtest!(write_replace_strange, |dir: Dir, _| {
         let mut cmd = dir.clean_command();
         dir.create("sherlock", SHERLOCK);
         dir.create("sherlock.crlf", SHERLOCK_MIXED_CRLF);
+        dir.create("sherlock.bom", SHERLOCK_BOM);
         dir.create("sherlock.no-eol", SHERLOCK_NO_EOL);
         dir.create("sherlock.bin", SHERLOCK_NUL);
 
@@ -58,8 +58,8 @@ rgtest!(write_replace_strange, |dir: Dir, _| {
             15 matched lines\n\
             5 files contained matches\n\
             5 files searched\n\
-            67034 bytes printed\n\
-            66943 bytes searched\n\
+            67035 bytes printed\n\
+            66944 bytes searched\n\
             <time> seconds spent searching\n\
             <time> seconds\n"
         } else {
@@ -68,28 +68,25 @@ rgtest!(write_replace_strange, |dir: Dir, _| {
             8 matched lines\n\
             4 files contained matches\n\
             5 files searched\n\
-            1474 bytes printed\n\
-            66946 bytes searched\n\
+            1472 bytes printed\n\
+            66944 bytes searched\n\
             <time> seconds spent searching\n\
             <time> seconds\n"
         };
 
         eqnice!(expected, stdout);
-        eqnice!(
-            SHERLOCK.replace("Sherlock", "Locksher"),
-            dir.read("sherlock")
-        ); // Output for stdin always goes to stdout
-        eqnice_repr!(
-            SHERLOCK_MIXED_CRLF.replace("Sherlock", "Locksher"),
-            dir.read("sherlock.crlf")
-        );
+        eqnice!(locksher(SHERLOCK), dir.read("sherlock")); // Output for stdin always goes to stdout
+        eqnice_repr!(locksher(SHERLOCK_MIXED_CRLF), dir.read("sherlock.crlf"));
+        // Bom is never stripped (it is stripped in the usual --encoding=auto mode, but that's incompatible with
+        // --write-to)
+        eqnice_repr!(locksher(SHERLOCK_BOM), dir.read("sherlock.bom"));
 
         // SHERLOCK_NO_EOL neds --no-ensure-eol to not add a \r\n at the end (or \n if --crlf isn't used)
         eqnice_repr!(
             if disable_fixes {
-                SHERLOCK_NO_EOL.replace("Sherlock", "Locksher") + "\r\n"
+                locksher(SHERLOCK_NO_EOL) + "\r\n"
             } else {
-                SHERLOCK_NO_EOL.replace("Sherlock", "Locksher")
+                locksher(SHERLOCK_NO_EOL)
             },
             dir.read("sherlock.no-eol")
         );
@@ -98,7 +95,7 @@ rgtest!(write_replace_strange, |dir: Dir, _| {
         eqnice_repr!(
             if disable_fixes {
                 // The first 65472 bytes are replaced, and then a warning message truncating the rest of the file
-                SHERLOCK_NUL[..65472].replace("Sherlock", "Locksher") +
+                locksher(&SHERLOCK_NUL[..65472]) +
                 "WARNING: stopped searching binary file after match (found \"\\0\" byte around offset 77041)\n"
             } else {
                 SHERLOCK_NUL.to_string()
@@ -140,9 +137,7 @@ rgtest!(
     |dir: Dir, _| {
         let filesize_multiplier = 1_000; // Smaller numbers are less likely to consistently give an error
         let big_sherlock = SHERLOCK.repeat(filesize_multiplier);
-        let expected = SHERLOCK
-            .replace("Sherlock", "Locksher")
-            .repeat(filesize_multiplier);
+        let expected = locksher(SHERLOCK).repeat(filesize_multiplier);
 
         // Since this test often fails, this will "randomly" shuffle which of the two cases is tested first
         let mut write_args = vec!["-WLocksher", "-O../out"];
@@ -220,6 +215,7 @@ rgtest!(write_symlinks, |dir: Dir, _| {
             dir.link_dir("out-in", "out/in");
             dir.link_file("sherlock.out", "out-in/sherlock.link");
         }
+        cmd.args(write_args).args(["<Replaced>", "-iL", "Sherlock", "in"]);
         let mut expected_files = dir.list();
 
         eqnice!("", cmd.stdout());
@@ -290,10 +286,11 @@ rgtest!(write_to_no_overwrite, |dir: Dir, _| {
             if write_args[0] == "-O" {
                 let expected = format!(
                     "rg: {input_file}: Refusing to overwrite input file in -O/--write-to mode: {}\n",
-                    dir.path_of(input_realpath).display());
+                    // Need to make sure path is correct for windows
+                    dir.path_of(input_realpath.replace("/", std::path::MAIN_SEPARATOR_STR)).display());
                 eqnice!(expected, cmd.stderr(2));
             } else {
-                let expected = SHERLOCK.replace("Sherlock", "Locksher");
+                let expected = locksher(SHERLOCK);
                 eqnice!("", cmd.stdout());
                 eqnice!(expected, dir.read(cwd.join(input_file)));
             }
@@ -452,38 +449,18 @@ rgtest!(write_stdin_multiline, |dir: Dir, _| {
     }
 });
 
-// A test of --write-replace with --mmap and a file with a BOM
-// (To test cases in search_file_maybe_path, search_slice, and search_reader)
-rgtest!(write_bom, |dir: Dir, _| {
-    // Test with a single line and a multiline regexx
-    for args in [vec!["Sherlock"], vec!["-U", "Sherlock(.|\n)*Sherlock"]] {
-        let mut cmd = dir.clean_command();
-        dir.create("sherlock.bom", SHERLOCK_BOM);
-        cmd.args(["--mmap", "-W", "Locksher"]).args(&args);
-        eqnice!("", cmd.stdout());
-        let expected = if args[0] == "-U" {
-            "\u{feff}For the Doctor Watsons of this world, as opposed to the Locksher Holmes\n\
-            can extract a clew from a wisp of straw or a flake of cigar ash;\n\
-            but Doctor Watson has to have it taken out for him and dusted,\n\
-            and exhibited clearly, with a label attached.\n"
-            .to_string()
-        } else {
-            SHERLOCK_BOM.replace("Sherlock", "Locksher")
-        };
-        eqnice_repr!(expected, dir.read("sherlock.bom"));
-    }
-});
-
 // A test that --write-replace refuses to work on UTF-16 files, as doing so would change the encoding
 rgtest!(write_replace_utf16, |dir: Dir, _| {
     for encoding_args in [vec![], vec!["--encoding=utf-16le"]] {
-        for write_args in [vec!["-W", "Locksher"], vec!["--write-to=folder"]] {
+        for write_args in
+            [vec!["-W"], vec!["--write-to=folder", "--passthru", "-r"]]
+        {
             let mut cmd = dir.clean_command();
             // A BOM is needed to auto-detect the encoding
             let sherlock_utf8 =
                 if encoding_args.is_empty() { SHERLOCK_BOM } else { SHERLOCK };
             // Add a random nom-BMP character to test encoding works
-            let sherlock_utf8 = sherlock_utf8.to_string() + "😃";
+            let sherlock_utf8 = sherlock_utf8.to_string() + "😃\n";
 
             // Can't use encoding_rs::UTF_16LE.encode at that actually encodes to UTF-8
             // (the +1 below is required by the convert_utf8_to_utf16 documentation)
@@ -502,52 +479,30 @@ rgtest!(write_replace_utf16, |dir: Dir, _| {
                 .collect();
 
             dir.create_bytes("sherlock.utf16", &sherlock_utf16);
-            cmd.args(&encoding_args).args(&write_args).args(["Sherlock"]);
+            cmd.args(&encoding_args)
+                .args(&write_args)
+                .args(["Locksher", "Sherlock"]);
 
             if write_args[0] == "-W" {
-                eqnice!("", cmd.stderr(2));
+                if encoding_args.is_empty() {
+                    eqnice!("", cmd.stderr(1));
+                } else {
+                    let expected = "rg: Using --encoding/--no-encoding with -W/--write-replace is currently not supported\n";
+                    eqnice!(expected, cmd.stderr(2));
+                }
+
                 // Files should be untouched
                 eqnice_repr!(sherlock_utf16, dir.read_bytes("sherlock.utf16"));
                 eqnice_list!("sherlock.utf16" => dir.list());
             } else {
                 // --write-to should work, but stripts the BOM and converts to utf-8
                 eqnice!("", cmd.stdout());
-                // The encoding_rs_io always strips non-UTF-8 BOM's, so we remove that
                 eqnice!(
-                    sherlock_utf8
-                        .replace("\u{FEFF}", "")
-                        .replace("Sherlock", "Locksher"),
+                    locksher(&sherlock_utf8).replace(BOM, ""),
                     dir.read("folder/sherlock.utf16")
                 );
                 eqnice_repr!(sherlock_utf16, dir.read_bytes("sherlock.utf16"));
-                eqnice_list!("folder/sherlock.utf16", "sherlock.utf16" => dir.list());
-            }
-        }
-    }
-});
-
-// A test that --write-replace/--write-to work when explicitly given no encoding or UTF-8
-rgtest!(write_basic_encoding, |dir: Dir, _| {
-    // Add a random nom-BMP character to test that it is preserved.
-    let sherlock = SHERLOCK_BOM.to_string() + "😃";
-    for encoding_arg in ["--encoding=utf-8", "--no-encoding"] {
-        let mut expected = sherlock.replace("Sherlock", "Locksher");
-        if encoding_arg.contains("utf-8") {
-            expected = expected.replace("\u{FEFF}", ""); // Sadly the BOM is stripped, despite the implied --no-strip-bom
-        }
-        for write_args in [["-W", "Locksher"], ["-Ofolder", "-RLocksher"]] {
-            let mut cmd = dir.clean_command();
-            dir.create("sherlock", &sherlock);
-            cmd.args([encoding_arg, "Sherlock"]).args(write_args);
-            if write_args[0] == "-W" {
-                eqnice!("", cmd.stdout());
-                eqnice!(expected, dir.read("sherlock"));
-                eqnice_list!("sherlock" => dir.list());
-            } else {
-                eqnice!("", cmd.stdout());
-                eqnice!(sherlock, dir.read("sherlock"));
-                eqnice!(expected, dir.read("folder/sherlock"));
-                eqnice_list!("folder", "folder/sherlock", "sherlock" => dir.list());
+                eqnice_list!("folder", "folder/sherlock.utf16", "sherlock.utf16" => dir.list());
             }
         }
     }
@@ -705,7 +660,7 @@ rgtest!(write_bad_flags, |dir: Dir, _| {
             "--column",
             "-M10",
             "--vimgrep",
-            "--context-separator=$",
+            "--context-separator=--",
         ]);
         if write_to {
             cmd.arg("--write-to=o");
@@ -778,9 +733,9 @@ rgtest!(write_fatal_flags, |dir: Dir, _| {
             cmd.arg(pre_arg).args(write_args).arg("Sherlock");
             if write_args[0] == "-W" {
                 let expected = if pre_arg == "-z" {
-                    "rg: Overwriting input files when using -z / --search-zip is currently not supported\n"
+                    "rg: Using -z/--search-zip with -W/--write-replace is currently not supported\n"
                 } else {
-                    "rg: Overwriting input files when using --pre is currently not supported\n"
+                    "rg: Using --pre with -W/--write-replace is currently not supported\n"
                 };
                 eqnice!(expected, cmd.stderr(2));
                 eqnice_list!("sherlock.gz" => dir.list());

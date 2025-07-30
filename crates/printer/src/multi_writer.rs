@@ -129,9 +129,14 @@ trait FilePaths {
         )?;
 
         if input_path == output_path {
+            let mut path = input_path.display().to_string();
+            // On windows, paths are often prefixed with \\?\ which is just weird, so I remove this
+            if cfg!(windows) {
+                path = path.trim_start_matches(r#"\\?\"#).to_string();
+            }
             other_error!(
                 "Refusing to overwrite input file in -O/--write-to mode: {}",
-                input_path.display()
+                path
             )
         } else {
             Ok(())

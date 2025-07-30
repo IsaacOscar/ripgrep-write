@@ -170,7 +170,14 @@ impl<'s, M: Matcher, S: Sink> Core<'s, M, S> {
             BinaryDetection::Convert(b) => b,
             _ => return Ok(false),
         };
-        if let Some(i) = buf[*range].find_byte(binary_byte) {
+
+        let range = if self.config.binary.is_strict() {
+            // Make sure we search the entire buffer
+            range.with_end(buf.len())
+        } else {
+            *range
+        };
+        if let Some(i) = buf[range].find_byte(binary_byte) {
             let offset = range.start() + i;
             self.binary_byte_offset = Some(offset);
             if !self.binary_data(offset as u64)? {

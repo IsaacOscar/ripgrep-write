@@ -712,16 +712,26 @@ d
         assert!(result.is_err());
     }
 
+    #[cfg(test)]
+    fn quit_detection(strict: bool) -> BinaryDetection {
+        if strict {
+            BinaryDetection::strict_quit(0)
+        } else {
+            BinaryDetection::quit(0)
+        }
+    }
     #[test]
     fn binary1() {
         let haystack = "\x00a";
         let exp = "\nbyte count:0\nbinary offset:0\n";
 
-        SearcherTester::new(haystack, "a")
-            .binary_detection(BinaryDetection::quit(0))
-            .line_number(false)
-            .expected_no_line_number(exp)
-            .test();
+        for strict in [false, true] {
+            SearcherTester::new(haystack, "a")
+                .binary_detection(quit_detection(strict))
+                .line_number(false)
+                .expected_no_line_number(exp)
+                .test();
+        }
     }
 
     #[test]
@@ -729,78 +739,90 @@ d
         let haystack = "a\x00";
         let exp = "\nbyte count:0\nbinary offset:1\n";
 
-        SearcherTester::new(haystack, "a")
-            .binary_detection(BinaryDetection::quit(0))
-            .line_number(false)
-            .expected_no_line_number(exp)
-            .test();
+        for strict in [false, true] {
+            SearcherTester::new(haystack, "a")
+                .binary_detection(quit_detection(strict))
+                .line_number(false)
+                .expected_no_line_number(exp)
+                .test();
+        }
     }
 
     #[test]
     fn binary3() {
-        let mut haystack = String::new();
-        haystack.push_str("a\n");
-        for _ in 0..DEFAULT_BUFFER_CAPACITY {
+        for strict in [false, true] {
+            let mut haystack = String::new();
+            haystack.push_str("a\n");
+            for _ in 0..DEFAULT_BUFFER_CAPACITY {
+                haystack.push_str("zzz\n");
+            }
+            haystack.push_str("a\n");
             haystack.push_str("zzz\n");
+            haystack.push_str("a\x00a\n");
+            haystack.push_str("zzz\n");
+            haystack.push_str("a\n");
+
+            // The line buffered searcher has slightly different semantics here.
+            // Namely, it will *always* detect binary data in the current buffer
+            // before searching it. Thus, the total number of bytes searched is
+            // smaller than below.
+            let exp = "0:a\n\nbyte count:262146\nbinary offset:262153\n";
+            // In contrast, the slice readers (for multi line as well) will only
+            // look for binary data in the initial chunk of bytes, unless in "strict" quit mode.
+            // After that point, it only looks for binary data in matches. Note though that
+            // the binary offset remains the same. (See the binary4 test for a case
+            // where the offset is explicitly different.)
+            let exp_slice = if strict {
+                "\nbyte count:0\nbinary offset:262153\n"
+            } else {
+                "0:a\n262146:a\n\nbyte count:262153\nbinary offset:262153\n"
+            };
+
+            SearcherTester::new(&haystack, "a")
+                .binary_detection(quit_detection(strict))
+                .line_number(false)
+                .auto_heap_limit(false)
+                .expected_no_line_number(exp)
+                .expected_slice_no_line_number(exp_slice)
+                .test();
         }
-        haystack.push_str("a\n");
-        haystack.push_str("zzz\n");
-        haystack.push_str("a\x00a\n");
-        haystack.push_str("zzz\n");
-        haystack.push_str("a\n");
-
-        // The line buffered searcher has slightly different semantics here.
-        // Namely, it will *always* detect binary data in the current buffer
-        // before searching it. Thus, the total number of bytes searched is
-        // smaller than below.
-        let exp = "0:a\n\nbyte count:262146\nbinary offset:262153\n";
-        // In contrast, the slice readers (for multi line as well) will only
-        // look for binary data in the initial chunk of bytes. After that
-        // point, it only looks for binary data in matches. Note though that
-        // the binary offset remains the same. (See the binary4 test for a case
-        // where the offset is explicitly different.)
-        let exp_slice =
-            "0:a\n262146:a\n\nbyte count:262153\nbinary offset:262153\n";
-
-        SearcherTester::new(&haystack, "a")
-            .binary_detection(BinaryDetection::quit(0))
-            .line_number(false)
-            .auto_heap_limit(false)
-            .expected_no_line_number(exp)
-            .expected_slice_no_line_number(exp_slice)
-            .test();
     }
 
     #[test]
     fn binary4() {
-        let mut haystack = String::new();
-        haystack.push_str("a\n");
-        for _ in 0..DEFAULT_BUFFER_CAPACITY {
-            haystack.push_str("zzz\n");
+        for strict in [false, true] {
+            let mut haystack = String::new();
+            haystack.push_str("a\n");
+            for _ in 0..DEFAULT_BUFFER_CAPACITY {
+                haystack.push_str("zzz\n");
+            }
+            haystack.push_str("a\n");
+            // The Read searcher will detect binary data here, but since this is
+            // beyond the initial buffer size and doesn't otherwise contain a
+            // match, the Slice reader won't detect the binary data until the next
+            // line (which is a match).
+            haystack.push_str("b\x00b\n");
+            haystack.push_str("a\x00a\n");
+            haystack.push_str("a\n");
+
+            let exp = "0:a\n\nbyte count:262146\nbinary offset:262149\n";
+            // In non-strict mode, the binary offset for the Slice readers corresponds
+            // to the binary data in `a\x00a\n` since the first line with binary data
+            // (`b\x00b\n`) isn't part of a match, and is therefore undetected.
+            let exp_slice = if strict {
+                "\nbyte count:0\nbinary offset:262149\n"
+            } else {
+                "0:a\n262146:a\n\nbyte count:262153\nbinary offset:262153\n"
+            };
+
+            SearcherTester::new(&haystack, "a")
+                .binary_detection(quit_detection(strict))
+                .line_number(false)
+                .auto_heap_limit(false)
+                .expected_no_line_number(exp)
+                .expected_slice_no_line_number(exp_slice)
+                .test();
         }
-        haystack.push_str("a\n");
-        // The Read searcher will detect binary data here, but since this is
-        // beyond the initial buffer size and doesn't otherwise contain a
-        // match, the Slice reader won't detect the binary data until the next
-        // line (which is a match).
-        haystack.push_str("b\x00b\n");
-        haystack.push_str("a\x00a\n");
-        haystack.push_str("a\n");
-
-        let exp = "0:a\n\nbyte count:262146\nbinary offset:262149\n";
-        // The binary offset for the Slice readers corresponds to the binary
-        // data in `a\x00a\n` since the first line with binary data
-        // (`b\x00b\n`) isn't part of a match, and is therefore undetected.
-        let exp_slice =
-            "0:a\n262146:a\n\nbyte count:262153\nbinary offset:262153\n";
-
-        SearcherTester::new(&haystack, "a")
-            .binary_detection(BinaryDetection::quit(0))
-            .line_number(false)
-            .auto_heap_limit(false)
-            .expected_no_line_number(exp)
-            .expected_slice_no_line_number(exp_slice)
-            .test();
     }
 
     #[test]

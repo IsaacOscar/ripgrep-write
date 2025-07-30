@@ -165,17 +165,26 @@ impl HiArgs {
             low.only_matching = false;
             low.vimgrep = false;
             low.with_filename = Some(false);
-            low.context_separator = ContextSeparator::disabled();
+            low.context_separator = Some(ContextSeparator::disabled());
 
-            // Ensure we don't use these input options, as writing back the data correctly will be too difficuilt
-            // (we don't simply disable the input options, as then the search itself will be wrong)
+            // Ensure we don't use these input options, as writing back the data in the same format as was read
+            // would be too dificuilt (we don't simply disable the input options, as then the search itself will be wrong)
             if low.search_zip {
-                // It would be nice to support this
-                anyhow::bail!("Overwriting input files when using -z / --search-zip is currently not supported");
+                anyhow::bail!("Using -z/--search-zip with -W/--write-replace is currently not supported");
             }
             if low.pre.is_some() {
                 // It would be nice to add a --post flag so you can undo --pre
-                anyhow::bail!("Overwriting input files when using --pre is currently not supported");
+                anyhow::bail!("Using --pre with -W/--write-replace is currently not supported");
+            }
+
+            low.encoding.get_or_insert(EncodingMode::Disabled); // Default if not specified
+            if low.encoding != Some(EncodingMode::Disabled) {
+                // Withought modifying the encoding_rs_io crate,
+                // Even --encoding=utf-8 or --encoding=auto when the file is in UTF-8 should be prohibited
+                // As encoding_rs_io doesn't expose a way to query the BOM/encoding of a file
+                // (it instead handle's translation transparently, and so ripgrep won't know what encoding to
+                // write back, or whether to write a BOM)
+                anyhow::bail!("Using --encoding/--no-encoding with -W/--write-replace is currently not supported");
             }
         }
 
@@ -217,6 +226,8 @@ impl HiArgs {
             .with_filename
             .unwrap_or_else(|| low.vimgrep || !paths.is_one_file);
 
+        let context_separator =
+            low.context_separator.unwrap_or(ContextSeparator::default());
         let file_separator = match low.mode {
             Mode::Search(SearchMode::Standard) => {
                 if heading {
@@ -224,7 +235,7 @@ impl HiArgs {
                 } else if let ContextMode::Limited(ref limited) = low.context {
                     let (before, after) = limited.get();
                     if before > 0 || after > 0 {
-                        low.context_separator.clone().into_bytes()
+                        context_separator.clone().into_bytes()
                     } else {
                         None
                     }
@@ -301,10 +312,10 @@ impl HiArgs {
             colors,
             column,
             context: low.context,
-            context_separator: low.context_separator,
+            context_separator,
             crlf: low.crlf,
             dfa_size_limit: low.dfa_size_limit,
-            encoding: low.encoding,
+            encoding: low.encoding.unwrap_or(EncodingMode::Auto),
             engine: low.engine,
             field_context_separator: low.field_context_separator,
             field_match_separator: low.field_match_separator,
@@ -668,7 +679,6 @@ impl HiArgs {
             .stats(self.stats.is_some())
             .trim_ascii(self.trim)
             .ensure_eol(!self.no_ensure_eol)
-            .ensure_no_binary(self.binary.is_ignored())
             .output_directory(
                 self.write_to.as_ref().map(|p| p.as_path()),
                 matches!(self.buffer, BufferMode::Auto | BufferMode::Block),
@@ -702,7 +712,6 @@ impl HiArgs {
             .separator_field(b":".to_vec())
             .separator_path(self.path_separator.clone())
             .stats(self.stats.is_some())
-            .ensure_no_binary(self.binary.is_ignored())
             .build(wtr)
     }
 
@@ -1200,11 +1209,11 @@ impl BinaryDetection {
     fn from_low_args(_: &State, low: &LowArgs) -> BinaryDetection {
         let none = matches!(low.binary, BinaryMode::AsText) || low.null_data;
         let convert = matches!(low.binary, BinaryMode::SearchAndSuppress);
-        let ignored = matches!(low.binary, BinaryMode::EnsureIgnored);
+        let ignored = matches!(low.binary, BinaryMode::StrictAuto);
         let explicit = if none {
             grep::searcher::BinaryDetection::none()
         } else if ignored {
-            grep::searcher::BinaryDetection::quit(b'\x00')
+            grep::searcher::BinaryDetection::strict_quit(b'\x00')
         } else {
             grep::searcher::BinaryDetection::convert(b'\x00')
         };
@@ -1212,6 +1221,8 @@ impl BinaryDetection {
             grep::searcher::BinaryDetection::none()
         } else if convert {
             grep::searcher::BinaryDetection::convert(b'\x00')
+        } else if ignored {
+            grep::searcher::BinaryDetection::strict_quit(b'\x00')
         } else {
             grep::searcher::BinaryDetection::quit(b'\x00')
         };
@@ -1223,13 +1234,6 @@ impl BinaryDetection {
     pub(crate) fn is_none(&self) -> bool {
         let none = grep::searcher::BinaryDetection::none();
         self.explicit == none && self.implicit == none
-    }
-
-    /// Returns true when both implicit and explicit binary files
-    /// are to be ignored.
-    pub(crate) fn is_ignored(&self) -> bool {
-        let quit = grep::searcher::BinaryDetection::quit(b'\x00');
-        self.explicit == quit && self.implicit == quit
     }
 }
 

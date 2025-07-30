@@ -46,10 +46,10 @@ pub(crate) struct LowArgs {
     pub(crate) colors: Vec<UserColorSpec>,
     pub(crate) column: Option<bool>,
     pub(crate) context: ContextMode,
-    pub(crate) context_separator: ContextSeparator,
+    pub(crate) context_separator: Option<ContextSeparator>,
     pub(crate) crlf: bool,
     pub(crate) dfa_size_limit: Option<usize>,
-    pub(crate) encoding: EncodingMode,
+    pub(crate) encoding: Option<EncodingMode>,
     pub(crate) engine: EngineChoice,
     pub(crate) field_context_separator: FieldContextSeparator,
     pub(crate) field_match_separator: FieldMatchSeparator,
@@ -252,7 +252,7 @@ pub(crate) enum BinaryMode {
     AsText,
     /// TODO: document, a stricter version of AUTO
     /// Explicit files are ignored, and it always suceeds at skipping binary files
-    EnsureIgnored,
+    StrictAuto,
 }
 
 impl Default for BinaryMode {

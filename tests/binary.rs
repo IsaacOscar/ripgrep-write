@@ -23,7 +23,7 @@ use crate::util::{Dir, TestCommand};
 // bytes are searched for everywhere.
 //
 // TODO: Add tests for binary file detection when using memory maps.
-const HAY: &'static [u8] = include_bytes!("./data/sherlock-nul.txt");
+const HAY: &'static [u8] = crate::hay::SHERLOCK_NUL.as_bytes();
 
 // This tests that ripgrep prints a warning message if it finds and prints a
 // match in a binary file before detecting that it is a binary file. The point

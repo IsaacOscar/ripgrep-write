@@ -51,9 +51,10 @@ type Range = Match;
 /// 2. When performing a search using memory maps or by reading data off the
 ///    heap, then binary detection is only guaranteed to be applied to the
 ///    parts corresponding to a match. When `Quit` is enabled, then the first
-///    few KB of the data are searched for binary data.
+///    few KB of the data are searched for binary data. However, there is a
+///    "strict" variant of "Quit" that will search the entire data.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct BinaryDetection(line_buffer::BinaryDetection);
+pub struct BinaryDetection(line_buffer::BinaryDetection, bool);
 
 impl BinaryDetection {
     /// No binary detection is performed. Data reported by the searcher may
@@ -61,7 +62,7 @@ impl BinaryDetection {
     ///
     /// This is the default.
     pub fn none() -> BinaryDetection {
-        BinaryDetection(line_buffer::BinaryDetection::None)
+        BinaryDetection(line_buffer::BinaryDetection::None, false)
     }
 
     /// Binary detection is performed by looking for the given byte.
@@ -78,7 +79,15 @@ impl BinaryDetection {
     /// lines are also searched for binary data. If binary data is detected at
     /// any point, then the search stops as if it reached EOF.
     pub fn quit(binary_byte: u8) -> BinaryDetection {
-        BinaryDetection(line_buffer::BinaryDetection::Quit(binary_byte))
+        BinaryDetection(line_buffer::BinaryDetection::Quit(binary_byte), false)
+    }
+
+    /// Binary detection is performed by looking for the given byte.
+    ///
+    /// This is like the "quit" strategy, but the entire contents are searched for
+    /// binary data.
+    pub fn strict_quit(binary_byte: u8) -> BinaryDetection {
+        BinaryDetection(line_buffer::BinaryDetection::Quit(binary_byte), true)
     }
 
     /// Binary detection is performed by looking for the given byte, and
@@ -94,7 +103,10 @@ impl BinaryDetection {
     /// When searching is performed with the entire contents mapped into
     /// memory, then this setting has no effect and is ignored.
     pub fn convert(binary_byte: u8) -> BinaryDetection {
-        BinaryDetection(line_buffer::BinaryDetection::Convert(binary_byte))
+        BinaryDetection(
+            line_buffer::BinaryDetection::Convert(binary_byte),
+            false,
+        )
     }
 
     /// If this binary detection uses the "quit" strategy, then this returns
@@ -115,6 +127,11 @@ impl BinaryDetection {
             line_buffer::BinaryDetection::Convert(b) => Some(b),
             _ => None,
         }
+    }
+
+    /// If this binary detection uses the "strict" variant of the "quit" strategy
+    pub fn is_strict(&self) -> bool {
+        self.1
     }
 }
 

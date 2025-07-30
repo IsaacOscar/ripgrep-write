@@ -64,7 +64,6 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &DfaSizeLimit,
     &Encoding,
     &Engine,
-    &EnsureNoBinary,
     &FieldContextSeparator,
     &FieldMatchSeparator,
     &Files,
@@ -134,6 +133,7 @@ pub(super) const FLAGS: &[&dyn Flag] = &[
     &Sortr,
     &Stats,
     &StopOnNonmatch,
+    &StrictNoBinary,
     &Text,
     &Threads,
     &Trace,
@@ -1152,8 +1152,8 @@ is still inserted. To completely disable context separators, use the
             FlagValue::Switch(true) => {
                 unreachable!("flag can only be disabled")
             }
-            FlagValue::Switch(false) => Separator::disabled(),
-            FlagValue::Value(v) => Separator::new(&v)?,
+            FlagValue::Switch(false) => Some(Separator::disabled()),
+            FlagValue::Value(v) => Some(Separator::new(&v)?),
         };
         Ok(())
     }
@@ -1169,13 +1169,16 @@ fn test_context_separator() {
     let getbytes = |ctxsep: Separator| ctxsep.into_bytes().map(BString::from);
 
     let args = parse_low_raw(None::<&str>).unwrap();
-    assert_eq!(Some(BString::from("--")), getbytes(args.context_separator));
+    assert_eq!(None, args.context_separator);
 
     let args = parse_low_raw(["--context-separator", "XYZ"]).unwrap();
-    assert_eq!(Some(BString::from("XYZ")), getbytes(args.context_separator));
+    assert_eq!(
+        Some(BString::from("XYZ")),
+        getbytes(args.context_separator.unwrap())
+    );
 
     let args = parse_low_raw(["--no-context-separator"]).unwrap();
-    assert_eq!(None, getbytes(args.context_separator));
+    assert_eq!(None, getbytes(args.context_separator.unwrap()));
 
     let args = parse_low_raw([
         "--context-separator",
@@ -1183,7 +1186,7 @@ fn test_context_separator() {
         "--no-context-separator",
     ])
     .unwrap();
-    assert_eq!(None, getbytes(args.context_separator));
+    assert_eq!(None, getbytes(args.context_separator.unwrap()));
 
     let args = parse_low_raw([
         "--no-context-separator",
@@ -1191,14 +1194,20 @@ fn test_context_separator() {
         "XYZ",
     ])
     .unwrap();
-    assert_eq!(Some(BString::from("XYZ")), getbytes(args.context_separator));
+    assert_eq!(
+        Some(BString::from("XYZ")),
+        getbytes(args.context_separator.unwrap())
+    );
 
     // This checks that invalid UTF-8 can be used. This case isn't too tricky
     // to handle, because it passes the invalid UTF-8 as an escape sequence
     // that is itself valid UTF-8. It doesn't become invalid UTF-8 until after
     // the argument is parsed and then unescaped.
     let args = parse_low_raw(["--context-separator", r"\xFF"]).unwrap();
-    assert_eq!(Some(BString::from(b"\xFF")), getbytes(args.context_separator));
+    assert_eq!(
+        Some(BString::from(b"\xFF")),
+        getbytes(args.context_separator.unwrap())
+    );
 
     // In this case, we specifically try to pass an invalid UTF-8 argument to
     // the flag. In theory we might be able to support this, but because we do
@@ -1579,7 +1588,7 @@ this case only applies to files that begin with a UTF-8 or UTF-16 byte-order
 mark (BOM). No other automatic detection is performed. One can also specify
 \fBnone\fP which will then completely disable BOM sniffing and always result
 in searching the raw bytes, including a BOM if it's present, regardless of its
-encoding (i.e. \flag{no-strip-bom} is implied).
+encoding.
 .sp
 Other supported values can be found in the list of labels here:
 \fIhttps://encoding.spec.whatwg.org/#concept-encoding-get\fP.
@@ -1601,15 +1610,17 @@ via the \flag-negate{encoding} flag.
                 unreachable!("--encoding must accept a value")
             }
             FlagValue::Switch(false) => {
-                args.encoding = EncodingMode::Auto;
+                args.encoding = Some(EncodingMode::Auto);
                 return Ok(());
             }
         };
         let label = convert::str(&value)?;
         args.encoding = match label {
-            "auto" => EncodingMode::Auto,
-            "none" => EncodingMode::Disabled,
-            _ => EncodingMode::Some(grep::searcher::Encoding::new(label)?),
+            "auto" => Some(EncodingMode::Auto),
+            "none" => Some(EncodingMode::Disabled),
+            _ => {
+                Some(EncodingMode::Some(grep::searcher::Encoding::new(label)?))
+            }
         };
         Ok(())
     }
@@ -1619,35 +1630,35 @@ via the \flag-negate{encoding} flag.
 #[test]
 fn test_encoding() {
     let args = parse_low_raw(None::<&str>).unwrap();
-    assert_eq!(EncodingMode::Auto, args.encoding);
+    assert_eq!(None, args.encoding);
 
     let args = parse_low_raw(["--encoding", "auto"]).unwrap();
-    assert_eq!(EncodingMode::Auto, args.encoding);
+    assert_eq!(Some(EncodingMode::Auto), args.encoding);
 
     let args = parse_low_raw(["--encoding", "none"]).unwrap();
-    assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(Some(EncodingMode::Disabled), args.encoding);
 
     let args = parse_low_raw(["--encoding=none"]).unwrap();
-    assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(Some(EncodingMode::Disabled), args.encoding);
 
     let args = parse_low_raw(["-E", "none"]).unwrap();
-    assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(Some(EncodingMode::Disabled), args.encoding);
 
     let args = parse_low_raw(["-Enone"]).unwrap();
-    assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(Some(EncodingMode::Disabled), args.encoding);
 
     let args = parse_low_raw(["-E", "none", "--no-encoding"]).unwrap();
-    assert_eq!(EncodingMode::Auto, args.encoding);
+    assert_eq!(Some(EncodingMode::Auto), args.encoding);
 
     let args = parse_low_raw(["--no-encoding", "-E", "none"]).unwrap();
-    assert_eq!(EncodingMode::Disabled, args.encoding);
+    assert_eq!(Some(EncodingMode::Disabled), args.encoding);
 
     let args = parse_low_raw(["-E", "utf-16"]).unwrap();
     let enc = grep::searcher::Encoding::new("utf-16").unwrap();
-    assert_eq!(EncodingMode::Some(enc), args.encoding);
+    assert_eq!(Some(EncodingMode::Some(enc)), args.encoding);
 
     let args = parse_low_raw(["-E", "utf-16", "--no-encoding"]).unwrap();
-    assert_eq!(EncodingMode::Auto, args.encoding);
+    assert_eq!(Some(EncodingMode::Auto), args.encoding);
 
     let result = parse_low_raw(["-E", "foo"]);
     assert!(result.is_err(), "{result:?}");
@@ -1743,61 +1754,6 @@ fn test_engine() {
     let args =
         parse_low_raw(["--engine=pcre2", "--no-auto-hybrid-regex"]).unwrap();
     assert_eq!(EngineChoice::Default, args.engine);
-}
-
-/// --ignore-binary
-#[derive(Debug)]
-struct EnsureNoBinary;
-
-impl Flag for EnsureNoBinary {
-    fn is_switch(&self) -> bool {
-        true
-    }
-    fn name_long(&self) -> &'static str {
-        "ensure-no-binary"
-    }
-    fn doc_category(&self) -> Category {
-        Category::Filter
-    }
-    fn doc_short(&self) -> &'static str {
-        "Ensure binary files are not searched."
-    }
-    fn doc_long(&self) -> &'static str {
-        r"
-TODO: Document,
-problem with legacy windows console...
-this is like \flag{no-binary}, but extra strict
-
-"
-    }
-
-    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
-        assert!(v.unwrap_switch(), "--ensure-no-binary has no negation");
-        args.binary = BinaryMode::EnsureIgnored;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn test_ensure_no_binary() {
-    let args = parse_low_raw(None::<&str>).unwrap();
-    assert_eq!(BinaryMode::Auto, args.binary);
-
-    let args = parse_low_raw(["--ensure-no-binary"]).unwrap();
-    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
-
-    let args = parse_low_raw(["--ensure-no-binary", "--no-binary"]).unwrap();
-    assert_eq!(BinaryMode::Auto, args.binary);
-
-    let args = parse_low_raw(["--ensure-no-binary", "--binary"]).unwrap();
-    assert_eq!(BinaryMode::SearchAndSuppress, args.binary);
-
-    let args = parse_low_raw(["--ensure-no-binary", "-a"]).unwrap();
-    assert_eq!(BinaryMode::AsText, args.binary);
-
-    let args = parse_low_raw(["-a", "--ensure-no-binary"]).unwrap();
-    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
 }
 
 /// --field-context-separator
@@ -6163,14 +6119,14 @@ Like \flag{replace}, but passthrough
         args.no_ensure_eol = true; // --no-ensure-eol
         if args.binary != BinaryMode::AsText {
             // if not --text
-            args.binary = BinaryMode::EnsureIgnored; // --ensure-no-binary
+            args.binary = BinaryMode::StrictAuto; // --strict-no-binary
         }
         use crate::flags::lowargs::ContextSeparator as Separator;
-        // Sadly, there's no way to distinguish between the user not having provided a --context-seperator
-        // or their being a --context-seperator --, so I just disable it uncodnitionally
-        args.context_separator = Separator::disabled(); // -- no-context-separator
 
-        // Default these to false if not manually specified
+        // Default these, if not manually specified
+        args.encoding = args.encoding.take().or(Some(EncodingMode::Disabled)); // --encoding=none
+        args.context_separator =
+            args.context_separator.take().or(Some(Separator::disabled())); // --no-context-separator
         args.line_number = args.line_number.or(Some(false)); // --no-line-number
         args.with_filename = args.with_filename.or(Some(false)); // --no-filename
         Ok(())
@@ -6184,7 +6140,6 @@ fn test_replace_passthru() {
     use bstr::BString;
 
     let mut ctx = ContextMode::default();
-    let sep = Separator::disabled();
     ctx.set_both(usize::MAX);
 
     let args = parse_low_raw(None::<&str>).unwrap();
@@ -6194,8 +6149,8 @@ fn test_replace_passthru() {
     assert_eq!(Some(BString::from("foo")), args.replace);
     assert_eq!(ctx, args.context);
     assert_eq!(true, args.no_ensure_eol);
-    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
-    assert_eq!(sep, args.context_separator);
+    assert_eq!(BinaryMode::StrictAuto, args.binary);
+    assert_eq!(Some(Separator::disabled()), args.context_separator);
     assert_eq!(Some(false), args.line_number);
     assert_eq!(Some(false), args.with_filename);
 
@@ -6209,7 +6164,8 @@ fn test_replace_passthru() {
     assert_eq!(BinaryMode::AsText, args.binary);
     assert_eq!(Some(BString::from("bar")), args.replace);
 
-    let args = parse_low_raw(["-Hnrbar"]).unwrap();
+    let args = parse_low_raw(["--context-separator=--", "-Hnrbar"]).unwrap();
+    assert_eq!(Some(Separator::default()), args.context_separator);
     assert_eq!(Some(true), args.with_filename);
     assert_eq!(Some(true), args.line_number);
     assert_eq!(Some(BString::from("bar")), args.replace);
@@ -6782,6 +6738,61 @@ fn test_stop_on_nonmatch() {
         parse_low_raw(["--stop-on-nonmatch", "--no-multiline"]).unwrap();
     assert_eq!(false, args.multiline);
     assert_eq!(true, args.stop_on_nonmatch);
+}
+
+/// --strict-no-binary
+#[derive(Debug)]
+struct StrictNoBinary;
+
+impl Flag for StrictNoBinary {
+    fn is_switch(&self) -> bool {
+        true
+    }
+    fn name_long(&self) -> &'static str {
+        "strict-no-binary"
+    }
+    fn doc_category(&self) -> Category {
+        Category::Filter
+    }
+    fn doc_short(&self) -> &'static str {
+        "Ensure binary files are not searched."
+    }
+    fn doc_long(&self) -> &'static str {
+        r"
+TODO: Document,
+problem with legacy windows console...
+this is like \flag-negate{no-binary}, but extra strict
+
+"
+    }
+
+    fn update(&self, v: FlagValue, args: &mut LowArgs) -> anyhow::Result<()> {
+        assert!(v.unwrap_switch(), "--strict-no-binary has no negation");
+        args.binary = BinaryMode::StrictAuto;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_strict_no_binary() {
+    let args = parse_low_raw(None::<&str>).unwrap();
+    assert_eq!(BinaryMode::Auto, args.binary);
+
+    let args = parse_low_raw(["--strict-no-binary"]).unwrap();
+    assert_eq!(BinaryMode::StrictAuto, args.binary);
+
+    let args = parse_low_raw(["--strict-no-binary", "--no-binary"]).unwrap();
+    assert_eq!(BinaryMode::Auto, args.binary);
+
+    let args = parse_low_raw(["--strict-no-binary", "--binary"]).unwrap();
+    assert_eq!(BinaryMode::SearchAndSuppress, args.binary);
+
+    let args = parse_low_raw(["--strict-no-binary", "-a"]).unwrap();
+    assert_eq!(BinaryMode::AsText, args.binary);
+
+    let args = parse_low_raw(["-a", "--strict-no-binary"]).unwrap();
+    assert_eq!(BinaryMode::StrictAuto, args.binary);
 }
 
 /// -a/--text
@@ -7740,7 +7751,7 @@ impl Flag for WriteReplace {
         args.context.set_both(usize::MAX);
         args.no_ensure_eol = true;
         if args.binary != BinaryMode::AsText {
-            args.binary = BinaryMode::EnsureIgnored;
+            args.binary = BinaryMode::StrictAuto;
         }
         args.line_number = args.line_number.or(Some(false));
         args.with_filename = args.with_filename.or(Some(false));
@@ -7763,7 +7774,7 @@ fn test_write_replace() {
     assert_eq!(Some(BString::from("foo")), args.replace);
     assert_eq!(ctx, args.context);
     assert_eq!(true, args.no_ensure_eol);
-    assert_eq!(BinaryMode::EnsureIgnored, args.binary);
+    assert_eq!(BinaryMode::StrictAuto, args.binary);
     assert_eq!(Some(false), args.line_number);
     assert_eq!(Some(false), args.with_filename);
     assert_eq!(Mode::Search(SearchMode::Standard), args.mode);
